@@ -1,0 +1,314 @@
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+
+	"github.com/spf13/cobra"
+)
+
+var baseDir = filepath.Join(os.Getenv("HOME"), "sandbox", "worktrees")
+
+func main() {
+	rootCmd := &cobra.Command{
+		Use:   "wt",
+		Short: "Git worktree manager",
+		Long:  "A CLI tool to manage git worktrees in a centralized location.",
+	}
+
+	// Add command
+	addCmd := &cobra.Command{
+		Use:   "add <name>",
+		Short: "Create a new worktree",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runAdd,
+	}
+
+	// List command
+	lsCmd := &cobra.Command{
+		Use:     "ls",
+		Aliases: []string{"list"},
+		Short:   "List all worktrees",
+		Args:    cobra.NoArgs,
+		RunE:    runList,
+	}
+
+	// Remove command
+	rmCmd := &cobra.Command{
+		Use:     "rm <name>",
+		Aliases: []string{"remove"},
+		Short:   "Remove a worktree",
+		Args:    cobra.ExactArgs(1),
+		RunE:    runRemove,
+		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+			if len(args) != 0 {
+				return nil, cobra.ShellCompDirectiveNoFileComp
+			}
+			return getWorktreeNames(toComplete), cobra.ShellCompDirectiveNoFileComp
+		},
+	}
+
+	// CD command
+	cdCmd := &cobra.Command{
+		Use:   "cd [name]",
+		Short: "Open a new shell in the worktree directory",
+		Args:  cobra.MaximumNArgs(1),
+		RunE:  runCD,
+		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+			if len(args) != 0 {
+				return nil, cobra.ShellCompDirectiveNoFileComp
+			}
+			return getWorktreeNames(toComplete), cobra.ShellCompDirectiveNoFileComp
+		},
+	}
+	cdCmd.Flags().BoolP("create", "c", false, "Create worktree if it doesn't exist")
+
+	// Completion command
+	completionCmd := &cobra.Command{
+		Use:   "completion [bash|zsh|fish|powershell]",
+		Short: "Generate shell completion scripts",
+		Long: `Generate shell completion scripts for wt.
+
+To load completions:
+
+Bash:
+  $ source <(wt completion bash)
+  # To load completions for each session, execute once:
+  # Linux:
+  $ wt completion bash > /etc/bash_completion.d/wt
+  # macOS:
+  $ wt completion bash > $(brew --prefix)/etc/bash_completion.d/wt
+
+Zsh:
+  # If shell completion is not already enabled in your environment,
+  # you will need to enable it. You can execute the following once:
+  $ echo "autoload -U compinit; compinit" >> ~/.zshrc
+
+  # To load completions for each session, execute once:
+  $ wt completion zsh > "${fpath[1]}/_wt"
+
+  # You may need to start a new shell for this setup to take effect.
+
+Fish:
+  $ wt completion fish | source
+  # To load completions for each session, execute once:
+  $ wt completion fish > ~/.config/fish/completions/wt.fish
+
+PowerShell:
+  PS> wt completion powershell | Out-String | Invoke-Expression
+  # To load completions for every new session, run:
+  PS> wt completion powershell > wt.ps1
+  # and source this file from your PowerShell profile.
+`,
+		DisableFlagsInUseLine: true,
+		ValidArgs:             []string{"bash", "zsh", "fish", "powershell"},
+		Args:                  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			switch args[0] {
+			case "bash":
+				return rootCmd.GenBashCompletion(os.Stdout)
+			case "zsh":
+				return rootCmd.GenZshCompletion(os.Stdout)
+			case "fish":
+				return rootCmd.GenFishCompletion(os.Stdout, true)
+			case "powershell":
+				return rootCmd.GenPowerShellCompletionWithDesc(os.Stdout)
+			default:
+				return fmt.Errorf("unknown shell: %s", args[0])
+			}
+		},
+	}
+
+	rootCmd.AddCommand(addCmd, lsCmd, rmCmd, cdCmd, completionCmd)
+
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func getWorktreeNames(prefix string) []string {
+	var names []string
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return names
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) {
+			names = append(names, entry.Name())
+		}
+	}
+	return names
+}
+
+func runAdd(cmd *cobra.Command, args []string) error {
+	name := args[0]
+	worktreePath := filepath.Join(baseDir, name)
+	projectDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Create worktree
+	gitCmd := exec.Command("git", "worktree", "add", worktreePath, "-b", "worktree/"+name)
+	gitCmd.Stdout = os.Stdout
+	gitCmd.Stderr = os.Stderr
+	if err := gitCmd.Run(); err != nil {
+		return fmt.Errorf("git worktree add failed: %w", err)
+	}
+
+	// Copy .env if exists
+	envSrc := filepath.Join(projectDir, ".env")
+	if _, err := os.Stat(envSrc); err == nil {
+		if err := copyFile(envSrc, filepath.Join(worktreePath, ".env")); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to copy .env: %v\n", err)
+		}
+	}
+
+	// Copy .envrc if exists and run direnv allow
+	envrcSrc := filepath.Join(projectDir, ".envrc")
+	if _, err := os.Stat(envrcSrc); err == nil {
+		if err := copyFile(envrcSrc, filepath.Join(worktreePath, ".envrc")); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to copy .envrc: %v\n", err)
+		} else {
+			direnvCmd := exec.Command("direnv", "allow")
+			direnvCmd.Dir = worktreePath
+			direnvCmd.Stdout = os.Stdout
+			direnvCmd.Stderr = os.Stderr
+			_ = direnvCmd.Run() // Ignore error if direnv not installed
+		}
+	}
+
+	fmt.Println(worktreePath)
+	return nil
+}
+
+func runList(cmd *cobra.Command, args []string) error {
+	gitCmd := exec.Command("git", "worktree", "list", "--porcelain")
+	output, err := gitCmd.Output()
+	if err != nil {
+		return fmt.Errorf("git worktree list failed: %w", err)
+	}
+
+	prefix := "worktree " + baseDir + "/"
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			fmt.Println(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return nil
+}
+
+func runRemove(cmd *cobra.Command, args []string) error {
+	name := args[0]
+	worktreePath := filepath.Join(baseDir, name)
+
+	gitCmd := exec.Command("git", "worktree", "remove", worktreePath)
+	gitCmd.Stdout = os.Stdout
+	gitCmd.Stderr = os.Stderr
+	return gitCmd.Run()
+}
+
+func runCD(cmd *cobra.Command, args []string) error {
+	create, _ := cmd.Flags().GetBool("create")
+
+	var dir string
+
+	if len(args) == 0 {
+		// No name provided, go to main worktree
+		gitCmd := exec.Command("git", "worktree", "list", "--porcelain")
+		output, err := gitCmd.Output()
+		if err != nil {
+			return fmt.Errorf("git worktree list failed: %w", err)
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.HasPrefix(line, "worktree ") {
+				dir = strings.TrimPrefix(line, "worktree ")
+				break
+			}
+		}
+		if dir == "" {
+			return fmt.Errorf("no worktrees found")
+		}
+	} else {
+		name := args[0]
+		dir = filepath.Join(baseDir, name)
+
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			if create {
+				if err := runAdd(cmd, args); err != nil {
+					return err
+				}
+			} else {
+				if !confirmCreate(name) {
+					return fmt.Errorf("aborted")
+				}
+				if err := runAdd(cmd, args); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return execShellInDir(dir)
+}
+
+func confirmCreate(name string) bool {
+	fmt.Printf("Worktree '%s' doesn't exist. Create it now? [y/N] ", name)
+	reader := bufio.NewReader(os.Stdin)
+	reply, _ := reader.ReadString('\n')
+	reply = strings.TrimSpace(strings.ToLower(reply))
+	return reply == "y" || reply == "yes"
+}
+
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0644)
+}
+
+func getParentShell() string {
+	ppid := os.Getppid()
+	// Use ps to get the parent process command name
+	cmd := exec.Command("ps", "-p", fmt.Sprintf("%d", ppid), "-o", "comm=")
+	output, err := cmd.Output()
+	if err == nil {
+		shell := strings.TrimSpace(string(output))
+		// Login shells on macOS show as "-zsh" or "-bash", strip the leading hyphen
+		shell = strings.TrimPrefix(shell, "-")
+		if shell != "" {
+			return shell
+		}
+	}
+	// Fall back to SHELL environment variable
+	if shell := os.Getenv("SHELL"); shell != "" {
+		return shell
+	}
+	// Ultimate fallback
+	return "/bin/sh"
+}
+
+func execShellInDir(dir string) error {
+	shell := getParentShell()
+	// If shell is just a name (e.g., "zsh"), find its full path
+	shellPath, err := exec.LookPath(shell)
+	if err != nil {
+		return fmt.Errorf("failed to find shell %q: %w", shell, err)
+	}
+
+	if err := os.Chdir(dir); err != nil {
+		return fmt.Errorf("failed to change to directory %q: %w", dir, err)
+	}
+
+	// Exec replaces the current process with the shell
+	if err := syscall.Exec(shellPath, []string{shell}, os.Environ()); err != nil {
+		return fmt.Errorf("failed to exec shell %q: %w", shellPath, err)
+	}
+	return nil
+}
