@@ -40,10 +40,10 @@ func main() {
 
 	// Remove command
 	rmCmd := &cobra.Command{
-		Use:     "rm <name>",
+		Use:     "rm <name> [git-args...]",
 		Aliases: []string{"remove"},
 		Short:   "Remove a worktree",
-		Args:    cobra.ExactArgs(1),
+		Args:    cobra.MinimumNArgs(1),
 		RunE:    runRemove,
 		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 			if len(args) != 0 {
@@ -52,6 +52,7 @@ func main() {
 			return getWorktreeNames(toComplete), cobra.ShellCompDirectiveNoFileComp
 		},
 	}
+	rmCmd.Flags().SetInterspersed(false)
 
 	// CD command
 	cdCmd := &cobra.Command{
@@ -207,7 +208,8 @@ func runRemove(cmd *cobra.Command, args []string) error {
 	name := args[0]
 	worktreePath := filepath.Join(baseDir, name)
 
-	gitCmd := exec.Command("git", "worktree", "remove", worktreePath)
+	gitArgs := append([]string{"worktree", "remove", worktreePath}, args[1:]...)
+	gitCmd := exec.Command("git", gitArgs...)
 	gitCmd.Stdout = os.Stdout
 	gitCmd.Stderr = os.Stderr
 	return gitCmd.Run()
