@@ -154,8 +154,16 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get current directory: %w", err)
 	}
 
-	// Create worktree
-	gitCmd := exec.Command("git", "worktree", "add", worktreePath, "-b", "worktree/"+name)
+	// Fetch latest from origin
+	fetchCmd := exec.Command("git", "fetch", "origin")
+	fetchCmd.Stdout = os.Stdout
+	fetchCmd.Stderr = os.Stderr
+	if err := fetchCmd.Run(); err != nil {
+		return fmt.Errorf("git fetch origin failed: %w", err)
+	}
+
+	// Create worktree off origin/main
+	gitCmd := exec.Command("git", "worktree", "add", worktreePath, "-b", "worktree/"+name, "origin/main")
 	gitCmd.Stdout = os.Stdout
 	gitCmd.Stderr = os.Stderr
 	if err := gitCmd.Run(); err != nil {
