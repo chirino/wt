@@ -13,19 +13,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var baseDir = filepath.Join(os.Getenv("HOME"), "sandbox", "worktrees")
+const worktreeDelimiter = "@"
 
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "wt",
 		Short: "Git worktree manager",
-		Long:  "A CLI tool to manage git worktrees in a centralized location.",
+		Long:  "A CLI tool to manage git worktrees as siblings of the main repository.",
 	}
 
 	// Add command
 	addCmd := &cobra.Command{
 		Use:   "add <name>",
-		Short: "Create a new worktree",
+		Short: "Create a new worktree (sibling of main repo, e.g. repo@name)",
 		Args:  cobra.ExactArgs(1),
 		RunE:  runAdd,
 	}
@@ -34,7 +34,7 @@ func main() {
 	lsCmd := &cobra.Command{
 		Use:     "ls",
 		Aliases: []string{"list"},
-		Short:   "List all worktrees",
+		Short:   "List all sibling worktrees",
 		Args:    cobra.NoArgs,
 		RunE:    runList,
 	}
@@ -145,15 +145,102 @@ PowerShell:
 	}
 }
 
-func getWorktreeNames(prefix string) []string {
-	var names []string
-	entries, err := os.ReadDir(baseDir)
+// getMainRepoRoot returns the absolute path to the main repository root.
+// Works from the main repo, any worktree, or any subdirectory thereof.
+func getMainRepoRoot() (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--git-common-dir")
+	output, err := cmd.Output()
 	if err != nil {
-		return names
+		return "", fmt.Errorf("not in a git repository: %w", err)
 	}
-	for _, entry := range entries {
-		if entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) {
-			names = append(names, entry.Name())
+	commonDir := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(commonDir) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		commonDir = filepath.Join(cwd, commonDir)
+	}
+	return filepath.Dir(filepath.Clean(commonDir)), nil
+}
+
+// getWorktreeParentDir returns the parent directory where sibling worktrees live.
+func getWorktreeParentDir() (string, error) {
+	mainRoot, err := getMainRepoRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(mainRoot), nil
+}
+
+// getCurrentWorktreeRoot returns the toplevel of the current working tree.
+func getCurrentWorktreeRoot() (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+// worktreeDirName returns the directory name for a worktree: "repo@name".
+func worktreeDirName(repoBasename, name string) string {
+	return repoBasename + worktreeDelimiter + name
+}
+
+// parseWorktreeName extracts the worktree name from a directory name like "repo@name".
+// Returns empty string if the directory doesn't match the repo prefix.
+func parseWorktreeName(dirName, repoBasename string) string {
+	prefix := repoBasename + worktreeDelimiter
+	if strings.HasPrefix(dirName, prefix) {
+		return strings.TrimPrefix(dirName, prefix)
+	}
+	return ""
+}
+
+// resolveWorktreePath returns the full path for a worktree by name.
+func resolveWorktreePath(name string) (string, error) {
+	parentDir, err := getWorktreeParentDir()
+	if err != nil {
+		return "", err
+	}
+	mainRoot, err := getMainRepoRoot()
+	if err != nil {
+		return "", err
+	}
+	dirName := worktreeDirName(filepath.Base(mainRoot), name)
+	return filepath.Join(parentDir, dirName), nil
+}
+
+func getWorktreeNames(prefix string) []string {
+	mainRoot, err := getMainRepoRoot()
+	if err != nil {
+		return nil
+	}
+	parentDir := filepath.Dir(mainRoot)
+	repoBasename := filepath.Base(mainRoot)
+
+	cmd := exec.Command("git", "worktree", "list", "--porcelain")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	var names []string
+	for _, line := range strings.Split(string(output), "\n") {
+		if !strings.HasPrefix(line, "worktree ") {
+			continue
+		}
+		wtPath := strings.TrimPrefix(line, "worktree ")
+		if wtPath == mainRoot {
+			continue
+		}
+		if filepath.Dir(wtPath) != parentDir {
+			continue
+		}
+		name := parseWorktreeName(filepath.Base(wtPath), repoBasename)
+		if name != "" && strings.HasPrefix(name, prefix) {
+			names = append(names, name)
 		}
 	}
 	return names
@@ -161,11 +248,32 @@ func getWorktreeNames(prefix string) []string {
 
 func runAdd(cmd *cobra.Command, args []string) error {
 	name := args[0]
-	worktreePath := filepath.Join(baseDir, name)
-	projectDir, err := os.Getwd()
+
+	worktreePath, err := resolveWorktreePath(name)
 	if err != nil {
-		return fmt.Errorf("failed to get current directory: %w", err)
+		return err
 	}
+
+	// Check if target path already exists
+	if info, err := os.Stat(worktreePath); err == nil {
+		if info.IsDir() {
+			gitPath := filepath.Join(worktreePath, ".git")
+			if _, err := os.Stat(gitPath); err == nil {
+				return fmt.Errorf("'%s' already exists with a .git entry; choose a different name or remove it first", filepath.Base(worktreePath))
+			}
+			return fmt.Errorf("'%s' already exists but is not a git worktree; choose a different name or remove it first", filepath.Base(worktreePath))
+		}
+		return fmt.Errorf("'%s' already exists as a file; choose a different name or remove it first", filepath.Base(worktreePath))
+	}
+
+	// Determine source directory for copying config files
+	projectDir, err := getCurrentWorktreeRoot()
+	if err != nil {
+		projectDir, _ = os.Getwd()
+	}
+
+	// Ensure relative paths for worktree links (devcontainer compatibility)
+	_ = exec.Command("git", "config", "worktree.useRelativePaths", "true").Run()
 
 	// Fetch latest from origin
 	fetchCmd := exec.Command("git", "fetch", "origin")
@@ -175,8 +283,8 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("git fetch origin failed: %w", err)
 	}
 
-	// Create worktree off origin/main
-	gitCmd := exec.Command("git", "worktree", "add", "--detach", worktreePath, "origin/main")
+	// Create worktree off current HEAD
+	gitCmd := exec.Command("git", "worktree", "add", "--detach", worktreePath, "HEAD")
 	gitCmd.Stdout = os.Stdout
 	gitCmd.Stderr = os.Stderr
 	if err := gitCmd.Run(); err != nil {
@@ -238,16 +346,33 @@ func runAdd(cmd *cobra.Command, args []string) error {
 }
 
 func runList(cmd *cobra.Command, args []string) error {
+	mainRoot, err := getMainRepoRoot()
+	if err != nil {
+		return err
+	}
+	parentDir := filepath.Dir(mainRoot)
+	repoBasename := filepath.Base(mainRoot)
+
 	gitCmd := exec.Command("git", "worktree", "list", "--porcelain")
 	output, err := gitCmd.Output()
 	if err != nil {
 		return fmt.Errorf("git worktree list failed: %w", err)
 	}
 
-	prefix := "worktree " + baseDir + "/"
 	for _, line := range strings.Split(string(output), "\n") {
-		if strings.HasPrefix(line, prefix) {
-			fmt.Println(strings.TrimPrefix(line, prefix))
+		if !strings.HasPrefix(line, "worktree ") {
+			continue
+		}
+		wtPath := strings.TrimPrefix(line, "worktree ")
+		if wtPath == mainRoot {
+			continue
+		}
+		if filepath.Dir(wtPath) != parentDir {
+			continue
+		}
+		name := parseWorktreeName(filepath.Base(wtPath), repoBasename)
+		if name != "" {
+			fmt.Println(name)
 		}
 	}
 	return nil
@@ -255,7 +380,10 @@ func runList(cmd *cobra.Command, args []string) error {
 
 func runRemove(cmd *cobra.Command, args []string) error {
 	name := args[0]
-	worktreePath := filepath.Join(baseDir, name)
+	worktreePath, err := resolveWorktreePath(name)
+	if err != nil {
+		return err
+	}
 
 	gitArgs := append([]string{"worktree", "remove", worktreePath}, args[1:]...)
 	gitCmd := exec.Command("git", gitArgs...)
@@ -268,22 +396,15 @@ func resolveWorktreeDir(cmd *cobra.Command, args []string) (string, error) {
 	create, _ := cmd.Flags().GetBool("create")
 
 	if len(args) == 0 {
-		// No name provided, go to main worktree
-		gitCmd := exec.Command("git", "worktree", "list", "--porcelain")
-		output, err := gitCmd.Output()
-		if err != nil {
-			return "", fmt.Errorf("git worktree list failed: %w", err)
-		}
-		for _, line := range strings.Split(string(output), "\n") {
-			if strings.HasPrefix(line, "worktree ") {
-				return strings.TrimPrefix(line, "worktree "), nil
-			}
-		}
-		return "", fmt.Errorf("no worktrees found")
+		// No name provided, go to main repo root
+		return getMainRepoRoot()
 	}
 
 	name := args[0]
-	dir := filepath.Join(baseDir, name)
+	dir, err := resolveWorktreePath(name)
+	if err != nil {
+		return "", err
+	}
 
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		if create {
@@ -321,7 +442,7 @@ func runCode(cmd *cobra.Command, args []string) error {
 	devcontainerJSON := filepath.Join(dir, ".devcontainer", "devcontainer.json")
 	if _, err := os.Stat(devcontainerJSON); err == nil {
 		if _, err := exec.LookPath("devcontainer"); err == nil {
-			openCmd = exec.Command("devcontainer", "open-in-code", dir)
+			openCmd = exec.Command("devcontainer", "open", dir)
 		}
 	}
 	if openCmd == nil {
