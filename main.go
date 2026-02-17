@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -438,20 +440,84 @@ func runCode(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	var openCmd *exec.Cmd
 	devcontainerJSON := filepath.Join(dir, ".devcontainer", "devcontainer.json")
 	if _, err := os.Stat(devcontainerJSON); err == nil {
 		if _, err := exec.LookPath("devcontainer"); err == nil {
-			openCmd = exec.Command("devcontainer", "open", dir)
+			return openDevcontainer(dir)
 		}
 	}
-	if openCmd == nil {
-		openCmd = exec.Command("code", dir)
-	}
 
+	openCmd := exec.Command("code", dir)
 	openCmd.Stdout = os.Stdout
 	openCmd.Stderr = os.Stderr
 	return openCmd.Run()
+}
+
+func openDevcontainer(dir string) error {
+	// Start the devcontainer and capture JSON output
+	upCmd := exec.Command("devcontainer", "up", "--workspace-folder", dir)
+	upCmd.Stderr = os.Stderr
+	out, err := upCmd.Output()
+	if err != nil {
+		return fmt.Errorf("devcontainer up failed: %w", err)
+	}
+
+	// devcontainer up may mix progress text with JSON on stdout;
+	// find the last line that looks like a JSON object
+	var jsonLine []byte
+	for _, line := range strings.Split(string(out), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "{") {
+			jsonLine = []byte(trimmed)
+		}
+	}
+	if jsonLine == nil {
+		return fmt.Errorf("devcontainer up produced no JSON output")
+	}
+
+	var result struct {
+		ContainerID           string `json:"containerId"`
+		RemoteWorkspaceFolder string `json:"remoteWorkspaceFolder"`
+	}
+	if err := json.Unmarshal(jsonLine, &result); err != nil {
+		return fmt.Errorf("failed to parse devcontainer up output: %w", err)
+	}
+
+	// Build VS Code arguments
+	hexID := hex.EncodeToString([]byte(result.ContainerID))
+	folderURI := fmt.Sprintf("vscode-remote://attached-container+%s%s", hexID, result.RemoteWorkspaceFolder)
+
+	userDataDir := filepath.Join(dir, ".vscode-profile")
+
+	codeArgs := []string{
+		"--user-data-dir", userDataDir,
+		"--folder-uri", folderURI,
+	}
+
+	// Add proxy setting if MICROSOCKS_PORT is configured
+	port, err := readEnvVar(filepath.Join(dir, ".devcontainer", ".env"), "MICROSOCKS_PORT")
+	if err == nil && port != "" {
+		codeArgs = append(codeArgs, fmt.Sprintf("--proxy-server=socks5://127.0.0.1:%s", port))
+	}
+
+	codeCmd := exec.Command("code", codeArgs...)
+	codeCmd.Stdout = os.Stdout
+	codeCmd.Stderr = os.Stderr
+	return codeCmd.Run()
+}
+
+func readEnvVar(path, key string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	prefix := key + "="
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimPrefix(line, prefix), nil
+		}
+	}
+	return "", fmt.Errorf("%s not found in %s", key, path)
 }
 
 func confirmCreate(name string) bool {
