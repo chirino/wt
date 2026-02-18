@@ -2,18 +2,25 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
 )
+
+//go:embed SKILL.md
+var wtExecSkill string
 
 const worktreeDelimiter = "@"
 
@@ -140,7 +147,131 @@ PowerShell:
 		},
 	}
 
-	rootCmd.AddCommand(addCmd, lsCmd, rmCmd, cdCmd, codeCmd, completionCmd)
+	// Name command
+	nameCmd := &cobra.Command{
+		Use:          "name",
+		Short:        "Print the name of the current worktree",
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name, err := resolveCurrentWorktreeName()
+			if err != nil {
+				return err
+			}
+			fmt.Println(name)
+			return nil
+		},
+	}
+
+	// Dir command
+	dirCmd := &cobra.Command{
+		Use:          "dir",
+		Short:        "Print the root directory of the current worktree or git project",
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root, err := getCurrentWorktreeRoot()
+			if err != nil {
+				return fmt.Errorf("not in a git repository")
+			}
+			fmt.Println(root)
+			return nil
+		},
+	}
+
+	// Exec command
+	execCmd := &cobra.Command{
+		Use:               "exec [name] -- <command> [args...]",
+		Short:             "Execute a command in the worktree's devcontainer (default: current worktree)",
+		Args:              cobra.MinimumNArgs(1),
+		RunE:              runExec,
+		ValidArgsFunction: worktreeArgsCompletion,
+	}
+	execCmd.Flags().SetInterspersed(false)
+
+	// Up command
+	upCmd := &cobra.Command{
+		Use:               "up [name] [devcontainer-args...]",
+		Short:             "Start the worktree's devcontainer (default: current worktree)",
+		Args:              cobra.ArbitraryArgs,
+		RunE:              runUp,
+		ValidArgsFunction: worktreeArgsCompletion,
+	}
+	upCmd.Flags().SetInterspersed(false)
+
+	// Build command
+	buildCmd := &cobra.Command{
+		Use:               "build [name] [devcontainer-args...]",
+		Short:             "Build the worktree's devcontainer (default: current worktree)",
+		Args:              cobra.ArbitraryArgs,
+		RunE:              runBuild,
+		ValidArgsFunction: worktreeArgsCompletion,
+	}
+	buildCmd.Flags().SetInterspersed(false)
+
+	// Proxy-port command
+	proxyPortCmd := &cobra.Command{
+		Use:               "proxy-port [name]",
+		Short:             "Print the SOCKS proxy port for the worktree's devcontainer",
+		Args:              cobra.MaximumNArgs(1),
+		SilenceUsage:      true,
+		ValidArgsFunction: worktreeArgsCompletion,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var name string
+			var err error
+			if len(args) == 0 {
+				name, err = resolveCurrentWorktreeName()
+				if err != nil {
+					return err
+				}
+			} else {
+				name, err = resolveNameArg(args[0])
+				if err != nil {
+					return err
+				}
+			}
+			dir, err := resolveWorktreePath(name)
+			if err != nil {
+				return err
+			}
+			port, err := readEnvVar(filepath.Join(dir, ".devcontainer", ".env"), "MICROSOCKS_PORT")
+			if err != nil {
+				return fmt.Errorf("no proxy port configured for worktree %q", name)
+			}
+			fmt.Println(port)
+			return nil
+		},
+	}
+
+	// Skill command
+	skillCmd := &cobra.Command{
+		Use:   "skill",
+		Short: "Print the Claude Code skill for worktree-isolated execution",
+		Long: `Print a Claude Code skill file that teaches Claude to use wt exec
+for commands that could conflict across worktrees.
+
+To import into a project:
+  wt skill > .claude/wt-exec.md
+
+Then add to the project's CLAUDE.md:
+  @.claude/wt-exec.md`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Print(wtExecSkill)
+		},
+	}
+
+	// Chrome command
+	chromeCmd := &cobra.Command{
+		Use:               "chrome [name] [-- chrome-args...]",
+		Short:             "Open a Chrome browser with per-worktree profile and proxy settings",
+		Args:              cobra.ArbitraryArgs,
+		RunE:              runChrome,
+		ValidArgsFunction: worktreeArgsCompletion,
+	}
+	chromeCmd.Flags().SetInterspersed(false)
+
+	rootCmd.AddCommand(addCmd, lsCmd, rmCmd, cdCmd, codeCmd, chromeCmd, nameCmd, dirCmd, execCmd, upCmd, buildCmd, proxyPortCmd, skillCmd, completionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -198,6 +329,36 @@ func parseWorktreeName(dirName, repoBasename string) string {
 		return strings.TrimPrefix(dirName, prefix)
 	}
 	return ""
+}
+
+// resolveCurrentWorktreeName returns the name of the current worktree based on cwd.
+// Returns an error if the user is not inside a named worktree.
+func resolveCurrentWorktreeName() (string, error) {
+	wtRoot, err := getCurrentWorktreeRoot()
+	if err != nil {
+		return "", fmt.Errorf("not in a git worktree")
+	}
+	mainRoot, err := getMainRepoRoot()
+	if err != nil {
+		return "", err
+	}
+	if wtRoot == mainRoot {
+		return "", fmt.Errorf("currently in the main worktree, not a named worktree")
+	}
+	repoBasename := filepath.Base(mainRoot)
+	name := parseWorktreeName(filepath.Base(wtRoot), repoBasename)
+	if name == "" {
+		return "", fmt.Errorf("current directory is not in a recognized worktree")
+	}
+	return name, nil
+}
+
+// resolveNameArg resolves a name argument, treating "." as the current worktree.
+func resolveNameArg(name string) (string, error) {
+	if name == "." {
+		return resolveCurrentWorktreeName()
+	}
+	return name, nil
 }
 
 // resolveWorktreePath returns the full path for a worktree by name.
@@ -381,7 +542,10 @@ func runList(cmd *cobra.Command, args []string) error {
 }
 
 func runRemove(cmd *cobra.Command, args []string) error {
-	name := args[0]
+	name, err := resolveNameArg(args[0])
+	if err != nil {
+		return err
+	}
 	worktreePath, err := resolveWorktreePath(name)
 	if err != nil {
 		return err
@@ -391,7 +555,17 @@ func runRemove(cmd *cobra.Command, args []string) error {
 	gitCmd := exec.Command("git", gitArgs...)
 	gitCmd.Stdout = os.Stdout
 	gitCmd.Stderr = os.Stderr
-	return gitCmd.Run()
+	if err := gitCmd.Run(); err != nil {
+		return err
+	}
+
+	// Clean up any leftover files (e.g. .vscode-profile, untracked files)
+	if _, err := os.Stat(worktreePath); err == nil {
+		if err := os.RemoveAll(worktreePath); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to remove %s: %v\n", worktreePath, err)
+		}
+	}
+	return nil
 }
 
 func resolveWorktreeDir(cmd *cobra.Command, args []string) (string, error) {
@@ -402,7 +576,10 @@ func resolveWorktreeDir(cmd *cobra.Command, args []string) (string, error) {
 		return getMainRepoRoot()
 	}
 
-	name := args[0]
+	name, err := resolveNameArg(args[0])
+	if err != nil {
+		return "", err
+	}
 	dir, err := resolveWorktreePath(name)
 	if err != nil {
 		return "", err
@@ -453,14 +630,230 @@ func runCode(cmd *cobra.Command, args []string) error {
 	return openCmd.Run()
 }
 
-func openDevcontainer(dir string) error {
-	// Start the devcontainer and capture JSON output
-	upCmd := exec.Command("devcontainer", "up", "--workspace-folder", dir)
-	upCmd.Stderr = os.Stderr
-	out, err := upCmd.Output()
+func findChromeBinary() (string, error) {
+	// Check common names in PATH first
+	for _, name := range []string{"google-chrome", "google-chrome-stable", "chromium-browser", "chromium"} {
+		if p, err := exec.LookPath(name); err == nil {
+			return p, nil
+		}
+	}
+	// macOS application bundle
+	if runtime.GOOS == "darwin" {
+		macPath := "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+		if _, err := os.Stat(macPath); err == nil {
+			return macPath, nil
+		}
+	}
+	return "", fmt.Errorf("could not find Chrome or Chromium; install Google Chrome or add it to your PATH")
+}
+
+func runChrome(cmd *cobra.Command, args []string) error {
+	name, extra, err := resolveOptionalWorktreeArgs(args)
 	if err != nil {
+		return err
+	}
+	dir, err := resolveWorktreePath(name)
+	if err != nil {
+		return err
+	}
+	if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+		if !confirmCreate(name) {
+			return fmt.Errorf("aborted")
+		}
+		if err := runAdd(cmd, []string{name}); err != nil {
+			return err
+		}
+	}
+
+	chromeBin, err := findChromeBinary()
+	if err != nil {
+		return err
+	}
+
+	profileDir := filepath.Join(dir, ".chrome-profile")
+	if err := os.MkdirAll(profileDir, 0755); err != nil {
+		return fmt.Errorf("failed to create Chrome profile directory: %w", err)
+	}
+
+	chromeArgs := []string{
+		"--user-data-dir=" + profileDir,
+	}
+
+	// Add proxy setting if MICROSOCKS_PORT is configured
+	port, err := readEnvVar(filepath.Join(dir, ".devcontainer", ".env"), "MICROSOCKS_PORT")
+	if err == nil && port != "" {
+		chromeArgs = append(chromeArgs, "--proxy-server=socks5://127.0.0.1:"+port)
+	}
+
+	chromeArgs = append(chromeArgs, extra...)
+
+	chromeCmd := exec.Command(chromeBin, chromeArgs...)
+	chromeCmd.Stdout = os.Stdout
+	chromeCmd.Stderr = os.Stderr
+	return chromeCmd.Start()
+}
+
+func runExec(cmd *cobra.Command, args []string) error {
+	name, cmdArgs, err := resolveExecArgs(args)
+	if err != nil {
+		return err
+	}
+	if len(cmdArgs) == 0 {
+		return fmt.Errorf("no command specified")
+	}
+
+	dir, err := resolveWorktreePath(name)
+	if err != nil {
+		return err
+	}
+
+	devcontainerJSON := filepath.Join(dir, ".devcontainer", "devcontainer.json")
+	if _, err := os.Stat(devcontainerJSON); err == nil {
+		dcArgs := append([]string{"exec", "--workspace-folder", dir}, cmdArgs...)
+		dcCmd := exec.Command("devcontainer", dcArgs...)
+		dcCmd.Stdin = os.Stdin
+		dcCmd.Stdout = os.Stdout
+		dcCmd.Stderr = os.Stderr
+		return dcCmd.Run()
+	}
+
+	// No devcontainer config — run the command directly in the worktree
+	execCmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
+	execCmd.Dir = dir
+	execCmd.Stdin = os.Stdin
+	execCmd.Stdout = os.Stdout
+	execCmd.Stderr = os.Stderr
+	return execCmd.Run()
+}
+
+// resolveExecArgs splits args into (worktreeName, commandArgs).
+// If the first arg is "." or matches a known worktree name, it's used as the
+// worktree name and the rest are the command. Otherwise, the current worktree
+// is used and all args are treated as the command.
+func resolveExecArgs(args []string) (string, []string, error) {
+	if args[0] == "." {
+		name, err := resolveCurrentWorktreeName()
+		if err != nil {
+			return "", nil, err
+		}
+		return name, args[1:], nil
+	}
+
+	// Check if the first arg is a known worktree name
+	names := getWorktreeNames("")
+	for _, n := range names {
+		if args[0] == n {
+			return n, args[1:], nil
+		}
+	}
+
+	// First arg is not a worktree — default to current worktree
+	name, err := resolveCurrentWorktreeName()
+	if err != nil {
+		return "", nil, err
+	}
+	return name, args, nil
+}
+
+func runUp(cmd *cobra.Command, args []string) error {
+	name, extra, err := resolveOptionalWorktreeArgs(args)
+	if err != nil {
+		return err
+	}
+	dir, err := resolveWorktreePath(name)
+	if err != nil {
+		return err
+	}
+	dcArgs := append([]string{"up", "--workspace-folder", dir}, extra...)
+	dcCmd := exec.Command("devcontainer", dcArgs...)
+	dcCmd.Stdin = os.Stdin
+	dcCmd.Stdout = os.Stdout
+	dcCmd.Stderr = os.Stderr
+	return dcCmd.Run()
+}
+
+func runBuild(cmd *cobra.Command, args []string) error {
+	name, extra, err := resolveOptionalWorktreeArgs(args)
+	if err != nil {
+		return err
+	}
+	dir, err := resolveWorktreePath(name)
+	if err != nil {
+		return err
+	}
+	dcArgs := append([]string{"build", "--workspace-folder", dir}, extra...)
+	dcCmd := exec.Command("devcontainer", dcArgs...)
+	dcCmd.Stdin = os.Stdin
+	dcCmd.Stdout = os.Stdout
+	dcCmd.Stderr = os.Stderr
+	return dcCmd.Run()
+}
+
+// resolveOptionalWorktreeArgs splits args into (worktreeName, remainingArgs).
+// If the first arg is "." or matches a known worktree name, it's used as the
+// worktree name. Otherwise, the current worktree is used and all args pass through.
+func resolveOptionalWorktreeArgs(args []string) (string, []string, error) {
+	if len(args) == 0 {
+		name, err := resolveCurrentWorktreeName()
+		if err != nil {
+			return "", nil, err
+		}
+		return name, nil, nil
+	}
+	return resolveExecArgs(args)
+}
+
+func defaultVSCodeUserDataDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", "Code")
+	case "linux":
+		return filepath.Join(home, ".config", "Code")
+	default:
+		return ""
+	}
+}
+
+func defaultVSCodeExtensionsDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".vscode", "extensions")
+}
+
+func setupVSCodeProfile(userDataDir string) {
+	defaultDataDir := defaultVSCodeUserDataDir()
+	if defaultDataDir == "" {
+		return
+	}
+	defaultUserDir := filepath.Join(defaultDataDir, "User")
+	if _, err := os.Stat(defaultUserDir); err != nil {
+		return
+	}
+	if err := os.MkdirAll(userDataDir, 0755); err != nil {
+		return
+	}
+	symlinkPath := filepath.Join(userDataDir, "User")
+	if _, err := os.Lstat(symlinkPath); os.IsNotExist(err) {
+		_ = os.Symlink(defaultUserDir, symlinkPath)
+	}
+}
+
+func openDevcontainer(dir string) error {
+	// Start the devcontainer, streaming output while capturing it for JSON parsing
+	var buf bytes.Buffer
+	upCmd := exec.Command("devcontainer", "up", "--workspace-folder", dir)
+	upCmd.Stdout = io.MultiWriter(os.Stdout, &buf)
+	upCmd.Stderr = os.Stderr
+	if err := upCmd.Run(); err != nil {
 		return fmt.Errorf("devcontainer up failed: %w", err)
 	}
+	out := buf.Bytes()
 
 	// devcontainer up may mix progress text with JSON on stdout;
 	// find the last line that looks like a JSON object
@@ -488,10 +881,19 @@ func openDevcontainer(dir string) error {
 	folderURI := fmt.Sprintf("vscode-remote://attached-container+%s%s", hexID, result.RemoteWorkspaceFolder)
 
 	userDataDir := filepath.Join(dir, ".vscode-profile")
+	setupVSCodeProfile(userDataDir)
 
 	codeArgs := []string{
 		"--user-data-dir", userDataDir,
 		"--folder-uri", folderURI,
+	}
+
+	// Share extensions from default VS Code installation
+	defaultExtDir := defaultVSCodeExtensionsDir()
+	if defaultExtDir != "" {
+		if _, err := os.Stat(defaultExtDir); err == nil {
+			codeArgs = append(codeArgs, "--extensions-dir", defaultExtDir)
+		}
 	}
 
 	// Add proxy setting if MICROSOCKS_PORT is configured
