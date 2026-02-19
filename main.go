@@ -26,12 +26,15 @@ var wtExecSkill string
 
 const worktreeDelimiter = "@"
 
+var verbose bool
+
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "wt",
 		Short: "Git worktree manager",
 		Long:  "A CLI tool to manage git worktrees as siblings of the main repository.",
 	}
+	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose output")
 
 	// Add command
 	addCmd := &cobra.Command{
@@ -729,15 +732,17 @@ func runChrome(cmd *cobra.Command, args []string) error {
 		extra[i] = normalizeLocalhostURL(arg)
 	}
 	chromeArgs = append(chromeArgs, extra...)
-	quotedArgs := make([]string, len(chromeArgs))
-	for i, arg := range chromeArgs {
-		quotedArgs[i] = strconv.Quote(arg)
-	}
-	fmt.Fprintf(os.Stderr, "Launching Chrome: %s %s\n", strconv.Quote(chromeBin), strings.Join(quotedArgs, " "))
 
 	chromeCmd := exec.Command(chromeBin, chromeArgs...)
-	chromeCmd.Stdout = os.Stdout
-	chromeCmd.Stderr = os.Stderr
+	if verbose {
+		quotedArgs := make([]string, len(chromeArgs))
+		for i, arg := range chromeArgs {
+			quotedArgs[i] = strconv.Quote(arg)
+		}
+		fmt.Fprintf(os.Stderr, "Launching Chrome: %s %s\n", strconv.Quote(chromeBin), strings.Join(quotedArgs, " "))
+		chromeCmd.Stdout = os.Stdout
+		chromeCmd.Stderr = os.Stderr
+	}
 	return chromeCmd.Start()
 }
 
@@ -778,19 +783,19 @@ func runPlaywright(cmd *cobra.Command, args []string) error {
 		"playwright",
 		"open",
 		"--proxy-server=socks5://127.0.0.1:" + port,
-		"--proxy-bypass-list=<-loopback>",
 	}
 	playwrightArgs = append(playwrightArgs, extra...)
 
-	quotedArgs := make([]string, len(playwrightArgs))
-	for i, arg := range playwrightArgs {
-		quotedArgs[i] = strconv.Quote(arg)
-	}
-	fmt.Fprintf(os.Stderr, "Launching Playwright: %s %s\n", strconv.Quote(npx), strings.Join(quotedArgs, " "))
-
 	playwrightCmd := exec.Command(npx, playwrightArgs...)
-	playwrightCmd.Stdout = os.Stdout
-	playwrightCmd.Stderr = os.Stderr
+	if verbose {
+		quotedArgs := make([]string, len(playwrightArgs))
+		for i, arg := range playwrightArgs {
+			quotedArgs[i] = strconv.Quote(arg)
+		}
+		fmt.Fprintf(os.Stderr, "Launching Playwright: %s %s\n", strconv.Quote(npx), strings.Join(quotedArgs, " "))
+		playwrightCmd.Stdout = os.Stdout
+		playwrightCmd.Stderr = os.Stderr
+	}
 	return playwrightCmd.Start()
 }
 
@@ -833,13 +838,14 @@ func runCurl(cmd *cobra.Command, args []string) error {
 	}
 	curlArgs = append(curlArgs, extra...)
 
-	quotedArgs := make([]string, len(curlArgs))
-	for i, arg := range curlArgs {
-		quotedArgs[i] = strconv.Quote(arg)
-	}
-	fmt.Fprintf(os.Stderr, "Launching curl: %s %s\n", strconv.Quote(curlBin), strings.Join(quotedArgs, " "))
-
 	curlCmd := exec.Command(curlBin, curlArgs...)
+	if verbose {
+		quotedArgs := make([]string, len(curlArgs))
+		for i, arg := range curlArgs {
+			quotedArgs[i] = strconv.Quote(arg)
+		}
+		fmt.Fprintf(os.Stderr, "Launching curl: %s %s\n", strconv.Quote(curlBin), strings.Join(quotedArgs, " "))
+	}
 	curlCmd.Stdout = os.Stdout
 	curlCmd.Stderr = os.Stderr
 	return curlCmd.Run()
