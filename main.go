@@ -271,7 +271,17 @@ Then add to the project's CLAUDE.md:
 	}
 	chromeCmd.Flags().SetInterspersed(false)
 
-	rootCmd.AddCommand(addCmd, lsCmd, rmCmd, cdCmd, codeCmd, chromeCmd, nameCmd, dirCmd, execCmd, upCmd, buildCmd, proxyPortCmd, skillCmd, completionCmd)
+	// Playwright command
+	playwrightCmd := &cobra.Command{
+		Use:               "playwright [name] [-- playwright-args...]",
+		Short:             "Open a URL in a Playwright browser with per-worktree proxy settings",
+		Args:              cobra.ArbitraryArgs,
+		RunE:              runPlaywright,
+		ValidArgsFunction: worktreeArgsCompletion,
+	}
+	playwrightCmd.Flags().SetInterspersed(false)
+
+	rootCmd.AddCommand(addCmd, lsCmd, rmCmd, cdCmd, codeCmd, chromeCmd, playwrightCmd, nameCmd, dirCmd, execCmd, upCmd, buildCmd, proxyPortCmd, skillCmd, completionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -624,10 +634,7 @@ func runCode(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	openCmd := exec.Command("code", dir)
-	openCmd.Stdout = os.Stdout
-	openCmd.Stderr = os.Stderr
-	return openCmd.Run()
+	return sysExec("code", []string{dir})
 }
 
 func findChromeBinary() (string, error) {
@@ -693,6 +700,45 @@ func runChrome(cmd *cobra.Command, args []string) error {
 	return chromeCmd.Start()
 }
 
+func runPlaywright(cmd *cobra.Command, args []string) error {
+	name, extra, err := resolveOptionalWorktreeArgs(args)
+	if err != nil {
+		return err
+	}
+	dir, err := resolveWorktreePath(name)
+	if err != nil {
+		return err
+	}
+	if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+		if !confirmCreate(name) {
+			return fmt.Errorf("aborted")
+		}
+		if err := runAdd(cmd, []string{name}); err != nil {
+			return err
+		}
+	}
+
+	playwrightArgs := []string{"playwright", "open"}
+
+	// Add proxy setting if MICROSOCKS_PORT is configured
+	port, err := readEnvVar(filepath.Join(dir, ".devcontainer", ".env"), "MICROSOCKS_PORT")
+	if err == nil && port != "" {
+		playwrightArgs = append(playwrightArgs, "--proxy-server=socks5://127.0.0.1:"+port)
+	}
+
+	playwrightArgs = append(playwrightArgs, extra...)
+
+	npx, err := exec.LookPath("npx")
+	if err != nil {
+		return fmt.Errorf("could not find npx; install Node.js and Playwright")
+	}
+
+	openCmd := exec.Command(npx, playwrightArgs...)
+	openCmd.Stdout = os.Stdout
+	openCmd.Stderr = os.Stderr
+	return openCmd.Start()
+}
+
 func runExec(cmd *cobra.Command, args []string) error {
 	name, cmdArgs, err := resolveExecArgs(args)
 	if err != nil {
@@ -710,20 +756,14 @@ func runExec(cmd *cobra.Command, args []string) error {
 	devcontainerJSON := filepath.Join(dir, ".devcontainer", "devcontainer.json")
 	if _, err := os.Stat(devcontainerJSON); err == nil {
 		dcArgs := append([]string{"exec", "--workspace-folder", dir}, cmdArgs...)
-		dcCmd := exec.Command("devcontainer", dcArgs...)
-		dcCmd.Stdin = os.Stdin
-		dcCmd.Stdout = os.Stdout
-		dcCmd.Stderr = os.Stderr
-		return dcCmd.Run()
+		return sysExec("devcontainer", dcArgs)
 	}
 
 	// No devcontainer config — run the command directly in the worktree
-	execCmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
-	execCmd.Dir = dir
-	execCmd.Stdin = os.Stdin
-	execCmd.Stdout = os.Stdout
-	execCmd.Stderr = os.Stderr
-	return execCmd.Run()
+	if err := os.Chdir(dir); err != nil {
+		return fmt.Errorf("failed to change to directory %q: %w", dir, err)
+	}
+	return sysExec(cmdArgs[0], cmdArgs[1:])
 }
 
 // resolveExecArgs splits args into (worktreeName, commandArgs).
@@ -765,11 +805,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	dcArgs := append([]string{"up", "--workspace-folder", dir}, extra...)
-	dcCmd := exec.Command("devcontainer", dcArgs...)
-	dcCmd.Stdin = os.Stdin
-	dcCmd.Stdout = os.Stdout
-	dcCmd.Stderr = os.Stderr
-	return dcCmd.Run()
+	return sysExec("devcontainer", dcArgs)
 }
 
 func runBuild(cmd *cobra.Command, args []string) error {
@@ -782,11 +818,7 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	dcArgs := append([]string{"build", "--workspace-folder", dir}, extra...)
-	dcCmd := exec.Command("devcontainer", dcArgs...)
-	dcCmd.Stdin = os.Stdin
-	dcCmd.Stdout = os.Stdout
-	dcCmd.Stderr = os.Stderr
-	return dcCmd.Run()
+	return sysExec("devcontainer", dcArgs)
 }
 
 // resolveOptionalWorktreeArgs splits args into (worktreeName, remainingArgs).
@@ -902,10 +934,7 @@ func openDevcontainer(dir string) error {
 		codeArgs = append(codeArgs, fmt.Sprintf("--proxy-server=socks5://127.0.0.1:%s", port))
 	}
 
-	codeCmd := exec.Command("code", codeArgs...)
-	codeCmd.Stdout = os.Stdout
-	codeCmd.Stderr = os.Stderr
-	return codeCmd.Run()
+	return sysExec("code", codeArgs)
 }
 
 func readEnvVar(path, key string) (string, error) {
@@ -969,21 +998,18 @@ func getParentShell() string {
 	return "/bin/sh"
 }
 
+func sysExec(argv0 string, args []string) error {
+	path, err := exec.LookPath(argv0)
+	if err != nil {
+		return fmt.Errorf("failed to find %q: %w", argv0, err)
+	}
+	return syscall.Exec(path, append([]string{argv0}, args...), os.Environ())
+}
+
 func execShellInDir(dir string) error {
 	shell := getParentShell()
-	// If shell is just a name (e.g., "zsh"), find its full path
-	shellPath, err := exec.LookPath(shell)
-	if err != nil {
-		return fmt.Errorf("failed to find shell %q: %w", shell, err)
-	}
-
 	if err := os.Chdir(dir); err != nil {
 		return fmt.Errorf("failed to change to directory %q: %w", dir, err)
 	}
-
-	// Exec replaces the current process with the shell
-	if err := syscall.Exec(shellPath, []string{shell}, os.Environ()); err != nil {
-		return fmt.Errorf("failed to exec shell %q: %w", shellPath, err)
-	}
-	return nil
+	return sysExec(shell, nil)
 }
