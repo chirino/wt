@@ -273,7 +273,27 @@ Then add to the project's CLAUDE.md:
 	}
 	chromeCmd.Flags().SetInterspersed(false)
 
-	rootCmd.AddCommand(addCmd, lsCmd, rmCmd, cdCmd, codeCmd, chromeCmd, nameCmd, dirCmd, execCmd, upCmd, buildCmd, proxyPortCmd, skillCmd, completionCmd)
+	// Playwright command
+	playwrightCmd := &cobra.Command{
+		Use:               "playwright [name] [-- playwright-args...]",
+		Short:             "Open a browser with Playwright using per-worktree proxy settings",
+		Args:              cobra.ArbitraryArgs,
+		RunE:              runPlaywright,
+		ValidArgsFunction: worktreeArgsCompletion,
+	}
+	playwrightCmd.Flags().SetInterspersed(false)
+
+	// Curl command
+	curlCmd := &cobra.Command{
+		Use:               "curl [name] [-- curl-args...]",
+		Short:             "Run curl with per-worktree proxy settings",
+		Args:              cobra.ArbitraryArgs,
+		RunE:              runCurl,
+		ValidArgsFunction: worktreeArgsCompletion,
+	}
+	curlCmd.Flags().SetInterspersed(false)
+
+	rootCmd.AddCommand(addCmd, lsCmd, rmCmd, cdCmd, codeCmd, chromeCmd, playwrightCmd, curlCmd, nameCmd, dirCmd, execCmd, upCmd, buildCmd, proxyPortCmd, skillCmd, completionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -719,6 +739,110 @@ func runChrome(cmd *cobra.Command, args []string) error {
 	chromeCmd.Stdout = os.Stdout
 	chromeCmd.Stderr = os.Stderr
 	return chromeCmd.Start()
+}
+
+func runPlaywright(cmd *cobra.Command, args []string) error {
+	name, extra, err := resolveOptionalWorktreeArgs(args)
+	if err != nil {
+		return err
+	}
+	dir, err := resolveWorktreePath(name)
+	if err != nil {
+		return err
+	}
+	if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+		if !confirmCreate(name) {
+			return fmt.Errorf("aborted")
+		}
+		if err := runAdd(cmd, []string{name}); err != nil {
+			return err
+		}
+	}
+
+	npx, err := exec.LookPath("npx")
+	if err != nil {
+		return fmt.Errorf("could not find npx; install Node.js and Playwright")
+	}
+
+	// Require a proxy port so all traffic is forced through it.
+	port, err := readEnvVar(filepath.Join(dir, ".devcontainer", ".env"), "MICROSOCKS_PORT")
+	if err != nil || port == "" {
+		return fmt.Errorf("no proxy port configured for worktree %q", name)
+	}
+
+	for i, arg := range extra {
+		extra[i] = normalizeLocalhostURL(arg)
+	}
+
+	playwrightArgs := []string{
+		"playwright",
+		"open",
+		"--proxy-server=socks5://127.0.0.1:" + port,
+		"--proxy-bypass-list=<-loopback>",
+	}
+	playwrightArgs = append(playwrightArgs, extra...)
+
+	quotedArgs := make([]string, len(playwrightArgs))
+	for i, arg := range playwrightArgs {
+		quotedArgs[i] = strconv.Quote(arg)
+	}
+	fmt.Fprintf(os.Stderr, "Launching Playwright: %s %s\n", strconv.Quote(npx), strings.Join(quotedArgs, " "))
+
+	playwrightCmd := exec.Command(npx, playwrightArgs...)
+	playwrightCmd.Stdout = os.Stdout
+	playwrightCmd.Stderr = os.Stderr
+	return playwrightCmd.Start()
+}
+
+func runCurl(cmd *cobra.Command, args []string) error {
+	name, extra, err := resolveOptionalWorktreeArgs(args)
+	if err != nil {
+		return err
+	}
+	dir, err := resolveWorktreePath(name)
+	if err != nil {
+		return err
+	}
+	if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+		if !confirmCreate(name) {
+			return fmt.Errorf("aborted")
+		}
+		if err := runAdd(cmd, []string{name}); err != nil {
+			return err
+		}
+	}
+
+	curlBin, err := exec.LookPath("curl")
+	if err != nil {
+		return fmt.Errorf("could not find curl; install curl first")
+	}
+
+	// Require a proxy port so all traffic is forced through it.
+	port, err := readEnvVar(filepath.Join(dir, ".devcontainer", ".env"), "MICROSOCKS_PORT")
+	if err != nil || port == "" {
+		return fmt.Errorf("no proxy port configured for worktree %q", name)
+	}
+
+	for i, arg := range extra {
+		extra[i] = normalizeLocalhostURL(arg)
+	}
+
+	curlArgs := []string{
+		"--proxy", "socks5h://127.0.0.1:" + port,
+		"--noproxy", "",
+	}
+	curlArgs = append(curlArgs, extra...)
+
+	quotedArgs := make([]string, len(curlArgs))
+	for i, arg := range curlArgs {
+		quotedArgs[i] = strconv.Quote(arg)
+	}
+	fmt.Fprintf(os.Stderr, "Launching curl: %s %s\n", strconv.Quote(curlBin), strings.Join(quotedArgs, " "))
+
+	curlCmd := exec.Command(curlBin, curlArgs...)
+	curlCmd.Stdout = os.Stdout
+	curlCmd.Stderr = os.Stderr
+	return curlCmd.Run()
 }
 
 func normalizeLocalhostURL(arg string) string {

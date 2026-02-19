@@ -91,6 +91,8 @@ All commands default to the current worktree when no name is given.
 | `wt build <name>` | Build a named worktree's devcontainer |
 | `wt chrome` | Open Chrome with proxy to the current worktree's devcontainer |
 | `wt chrome <name>` | Open Chrome with proxy to a named worktree's devcontainer |
+| `wt curl -- <curl-args>` | Run curl with proxy to the current worktree's devcontainer |
+| `wt curl <name> -- <curl-args>` | Run curl with proxy to a named worktree's devcontainer |
 | `wt proxy-port` | Print the SOCKS proxy port for the current worktree |
 | `wt proxy-port <name>` | Print the SOCKS proxy port for a named worktree |
 | `wt name` | Print the current worktree name |

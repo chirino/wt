@@ -170,6 +170,7 @@ Then reference it from your project's `CLAUDE.md`:
 | `wt up <name>` | Start the worktree's devcontainer |
 | `wt build <name>` | Build the worktree's devcontainer |
 | `wt exec <name> -- <cmd>` | Run a command in the worktree's devcontainer |
+| `wt curl [name] -- <curl-args>` | Run curl with the worktree SOCKS proxy |
 | `wt proxy-port [name]` | Print the SOCKS proxy port |
 | `wt name` | Print the current worktree name |
 | `wt dir` | Print the current worktree root directory |
