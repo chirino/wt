@@ -127,7 +127,7 @@ wt proxy-port
 Then use it to reach services inside the container:
 
 ```bash
-curl --proxy socks5h://127.0.0.1:$(wt proxy-port) http://localhost:8080
+curl --proxy socks5h://127.0.0.1:$(wt proxy-port) http://127.0.0.1:8080
 ```
 
 ### Utility commands

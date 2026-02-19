@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -271,17 +273,7 @@ Then add to the project's CLAUDE.md:
 	}
 	chromeCmd.Flags().SetInterspersed(false)
 
-	// Playwright command
-	playwrightCmd := &cobra.Command{
-		Use:               "playwright [name] [-- playwright-args...]",
-		Short:             "Open a URL in a Playwright browser with per-worktree proxy settings",
-		Args:              cobra.ArbitraryArgs,
-		RunE:              runPlaywright,
-		ValidArgsFunction: worktreeArgsCompletion,
-	}
-	playwrightCmd.Flags().SetInterspersed(false)
-
-	rootCmd.AddCommand(addCmd, lsCmd, rmCmd, cdCmd, codeCmd, chromeCmd, playwrightCmd, nameCmd, dirCmd, execCmd, upCmd, buildCmd, proxyPortCmd, skillCmd, completionCmd)
+	rootCmd.AddCommand(addCmd, lsCmd, rmCmd, cdCmd, codeCmd, chromeCmd, nameCmd, dirCmd, execCmd, upCmd, buildCmd, proxyPortCmd, skillCmd, completionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -368,11 +360,17 @@ func resolveNameArg(name string) (string, error) {
 	if name == "." {
 		return resolveCurrentWorktreeName()
 	}
+	if err := validateWorktreeName(name); err != nil {
+		return "", err
+	}
 	return name, nil
 }
 
 // resolveWorktreePath returns the full path for a worktree by name.
 func resolveWorktreePath(name string) (string, error) {
+	if err := validateWorktreeName(name); err != nil {
+		return "", err
+	}
 	parentDir, err := getWorktreeParentDir()
 	if err != nil {
 		return "", err
@@ -421,6 +419,9 @@ func getWorktreeNames(prefix string) []string {
 
 func runAdd(cmd *cobra.Command, args []string) error {
 	name := args[0]
+	if err := validateWorktreeName(name); err != nil {
+		return err
+	}
 
 	worktreePath, err := resolveWorktreePath(name)
 	if err != nil {
@@ -448,12 +449,16 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	// Ensure relative paths for worktree links (devcontainer compatibility)
 	_ = exec.Command("git", "config", "worktree.useRelativePaths", "true").Run()
 
-	// Fetch latest from origin
-	fetchCmd := exec.Command("git", "fetch", "origin")
-	fetchCmd.Stdout = os.Stdout
-	fetchCmd.Stderr = os.Stderr
-	if err := fetchCmd.Run(); err != nil {
-		return fmt.Errorf("git fetch origin failed: %w", err)
+	// Best-effort fetch from origin, if configured.
+	if err := exec.Command("git", "remote", "get-url", "origin").Run(); err == nil {
+		fetchCmd := exec.Command("git", "fetch", "origin")
+		fetchCmd.Stdout = os.Stdout
+		fetchCmd.Stderr = os.Stderr
+		if err := fetchCmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: git fetch origin failed: %v\n", err)
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "Warning: git remote 'origin' not configured; skipping fetch")
 	}
 
 	// Create worktree off current HEAD
@@ -684,15 +689,31 @@ func runChrome(cmd *cobra.Command, args []string) error {
 
 	chromeArgs := []string{
 		"--user-data-dir=" + profileDir,
+		// Skip onboarding UI in fresh profiles.
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--disable-sync",
+		"--disable-features=ChromeSignin",
 	}
 
-	// Add proxy setting if MICROSOCKS_PORT is configured
+	// Require a proxy port so all traffic is forced through it.
 	port, err := readEnvVar(filepath.Join(dir, ".devcontainer", ".env"), "MICROSOCKS_PORT")
-	if err == nil && port != "" {
-		chromeArgs = append(chromeArgs, "--proxy-server=socks5://127.0.0.1:"+port)
+	if err != nil || port == "" {
+		return fmt.Errorf("no proxy port configured for worktree %q", name)
 	}
+	chromeArgs = append(chromeArgs, "--proxy-server=socks5://127.0.0.1:"+port)
+	// Proxy everything, including loopback targets, through SOCKS.
+	chromeArgs = append(chromeArgs, "--proxy-bypass-list=<-loopback>")
 
+	for i, arg := range extra {
+		extra[i] = normalizeLocalhostURL(arg)
+	}
 	chromeArgs = append(chromeArgs, extra...)
+	quotedArgs := make([]string, len(chromeArgs))
+	for i, arg := range chromeArgs {
+		quotedArgs[i] = strconv.Quote(arg)
+	}
+	fmt.Fprintf(os.Stderr, "Launching Chrome: %s %s\n", strconv.Quote(chromeBin), strings.Join(quotedArgs, " "))
 
 	chromeCmd := exec.Command(chromeBin, chromeArgs...)
 	chromeCmd.Stdout = os.Stdout
@@ -700,44 +721,19 @@ func runChrome(cmd *cobra.Command, args []string) error {
 	return chromeCmd.Start()
 }
 
-func runPlaywright(cmd *cobra.Command, args []string) error {
-	name, extra, err := resolveOptionalWorktreeArgs(args)
-	if err != nil {
-		return err
+func normalizeLocalhostURL(arg string) string {
+	parsed, err := url.Parse(arg)
+	if err != nil || parsed.Host == "" || parsed.Hostname() != "localhost" {
+		return arg
 	}
-	dir, err := resolveWorktreePath(name)
-	if err != nil {
-		return err
+	if parsed.Port() == "" {
+		parsed.Host = "127.0.0.1"
+	} else {
+		parsed.Host = net.JoinHostPort("127.0.0.1", parsed.Port())
 	}
-	if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
-		if !confirmCreate(name) {
-			return fmt.Errorf("aborted")
-		}
-		if err := runAdd(cmd, []string{name}); err != nil {
-			return err
-		}
-	}
-
-	playwrightArgs := []string{"playwright", "open"}
-
-	// Add proxy setting if MICROSOCKS_PORT is configured
-	port, err := readEnvVar(filepath.Join(dir, ".devcontainer", ".env"), "MICROSOCKS_PORT")
-	if err == nil && port != "" {
-		playwrightArgs = append(playwrightArgs, "--proxy-server=socks5://127.0.0.1:"+port)
-	}
-
-	playwrightArgs = append(playwrightArgs, extra...)
-
-	npx, err := exec.LookPath("npx")
-	if err != nil {
-		return fmt.Errorf("could not find npx; install Node.js and Playwright")
-	}
-
-	openCmd := exec.Command(npx, playwrightArgs...)
-	openCmd.Stdout = os.Stdout
-	openCmd.Stderr = os.Stderr
-	return openCmd.Start()
+	return parsed.String()
 }
+
 
 func runExec(cmd *cobra.Command, args []string) error {
 	name, cmdArgs, err := resolveExecArgs(args)
@@ -943,12 +939,34 @@ func readEnvVar(path, key string) (string, error) {
 		return "", err
 	}
 	prefix := key + "="
+	value := ""
+	found := false
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.HasPrefix(line, prefix) {
-			return strings.TrimPrefix(line, prefix), nil
+			value = strings.TrimPrefix(line, prefix)
+			found = true
 		}
 	}
+	if found {
+		return value, nil
+	}
 	return "", fmt.Errorf("%s not found in %s", key, path)
+}
+
+func validateWorktreeName(name string) error {
+	if name == "" {
+		return fmt.Errorf("worktree name cannot be empty")
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("invalid worktree name %q", name)
+	}
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return fmt.Errorf("invalid worktree name %q: path separators are not allowed", name)
+	}
+	if filepath.Base(name) != name || filepath.IsAbs(name) {
+		return fmt.Errorf("invalid worktree name %q", name)
+	}
+	return nil
 }
 
 func confirmCreate(name string) bool {

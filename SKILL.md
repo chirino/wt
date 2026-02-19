@@ -63,7 +63,7 @@ For CLI access, use the proxy port directly:
 
 ```sh
 # curl through the proxy
-curl --proxy socks5h://127.0.0.1:$(wt proxy-port) http://localhost:8080
+curl --proxy socks5h://127.0.0.1:$(wt proxy-port) http://127.0.0.1:8080
 
 # Or set the environment variable for tools that support it
 export ALL_PROXY=socks5h://127.0.0.1:$(wt proxy-port)
