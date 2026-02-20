@@ -726,6 +726,9 @@ func runChrome(cmd *cobra.Command, args []string) error {
 	// Proxy everything, including loopback targets, through SOCKS.
 	chromeArgs = append(chromeArgs, "--proxy-bypass-list=<-loopback>")
 
+	if len(extra) == 0 {
+		extra = append(extra, getDefaultURL(dir))
+	}
 	for i, arg := range extra {
 		extra[i] = normalizeLocalhostURL(arg)
 	}
@@ -761,6 +764,9 @@ func runPlaywright(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if len(extra) == 0 {
+		extra = append(extra, getDefaultURL(dir))
+	}
 	for i, arg := range extra {
 		extra[i] = normalizeLocalhostURL(arg)
 	}
@@ -1122,17 +1128,25 @@ func openDevcontainer(dir string) error {
 
 // getProxyPort discovers the host port mapped to the SOCKS5 proxy (container port 1080)
 // by inspecting the running devcontainer for the given workspace directory.
-func getProxyPort(dir string) (string, error) {
+func getContainerID(dir string) (string, error) {
 	out, err := exec.Command("docker", "ps", "-q", "--filter", "label=devcontainer.local_folder="+dir).Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to query docker: %w", err)
 	}
 	containerID := strings.TrimSpace(strings.Split(string(out), "\n")[0])
 	if containerID == "" {
-		return "", fmt.Errorf("no running devcontainer found for %q", filepath.Base(dir))
+		return "", fmt.Errorf("no running devcontainer found for %q; start one with: wt up %s", filepath.Base(dir), filepath.Base(dir))
+	}
+	return containerID, nil
+}
+
+func getProxyPort(dir string) (string, error) {
+	containerID, err := getContainerID(dir)
+	if err != nil {
+		return "", err
 	}
 
-	out, err = exec.Command("docker", "port", containerID, "1080").Output()
+	out, err := exec.Command("docker", "port", containerID, "1080").Output()
 	if err != nil {
 		return "", fmt.Errorf("no proxy port mapped for devcontainer %q", filepath.Base(dir))
 	}
@@ -1143,6 +1157,58 @@ func getProxyPort(dir string) (string, error) {
 		return "", fmt.Errorf("failed to parse port from %q: %w", addr, err)
 	}
 	return port, nil
+}
+
+// getDefaultURL inspects the running devcontainer's metadata for port labels.
+// Prefers ports labeled "https" over "http". Falls back to http://127.0.0.1:8080.
+func getDefaultURL(dir string) string {
+	const fallback = "http://127.0.0.1:8080"
+
+	containerID, err := getContainerID(dir)
+	if err != nil {
+		return fallback
+	}
+
+	out, err := exec.Command("docker", "inspect", "--format",
+		`{{index .Config.Labels "devcontainer.metadata"}}`, containerID).Output()
+	if err != nil {
+		return fallback
+	}
+
+	// devcontainer.metadata is a JSON array of config layer objects
+	var metadata []struct {
+		PortsAttributes map[string]struct {
+			Label string `json:"label"`
+		} `json:"portsAttributes"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out), &metadata); err != nil {
+		return fallback
+	}
+
+	// Scan all config layers; prefer https over http
+	var httpPort, httpsPort string
+	for _, m := range metadata {
+		for port, attr := range m.PortsAttributes {
+			switch strings.ToLower(attr.Label) {
+			case "https":
+				if httpsPort == "" {
+					httpsPort = port
+				}
+			case "http":
+				if httpPort == "" {
+					httpPort = port
+				}
+			}
+		}
+	}
+
+	if httpsPort != "" {
+		return "https://127.0.0.1:" + httpsPort
+	}
+	if httpPort != "" {
+		return "http://127.0.0.1:" + httpPort
+	}
+	return fallback
 }
 
 func validateWorktreeName(name string) error {
