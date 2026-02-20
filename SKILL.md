@@ -22,10 +22,9 @@ Use `wt exec -- <command> [args...]` for any command that:
 
 Examples:
 ```sh
-wt exec -- make test
+wt exec # starts an interactive shell
 wt exec -- npm run dev
 wt exec -- go test ./...
-wt exec -- cargo test
 ```
 
 ## When NOT to use `wt exec`
@@ -37,7 +36,7 @@ to the worktree and cannot conflict:
 - Git operations (`git status`, `git diff`, `git log`)
 - Editing files
 - Running linters or formatters that don't start servers
-- `wt` subcommands themselves (`wt ls`, `wt name`, `wt dir`)
+- `wt` subcommands themselves (`wt ls`, `wt name`, `wt dir`, `wt skill`)
 
 ## Accessing HTTP services inside the devcontainer
 
@@ -56,8 +55,11 @@ wt chrome
 wt chrome <name>
 
 # Open a specific URL
-wt chrome -- http://localhost:8080
+wt chrome -- http://127.0.0.1:8080
 ```
+
+**Important:** Always use `127.0.0.1` instead of `localhost` in URLs.
+The SOCKS5 proxy cannot resolve `localhost` reliably.
 
 For CLI access, use the proxy port directly:
 
@@ -93,6 +95,11 @@ All commands default to the current worktree when no name is given.
 | `wt chrome <name>` | Open Chrome with proxy to a named worktree's devcontainer |
 | `wt curl -- <curl-args>` | Run curl with proxy to the current worktree's devcontainer |
 | `wt curl <name> -- <curl-args>` | Run curl with proxy to a named worktree's devcontainer |
+| `wt playwright` | Open a Playwright browser with proxy to the current worktree's devcontainer |
+| `wt playwright <name>` | Open a Playwright browser with proxy to a named worktree's devcontainer |
+| `wt down` | Stop and remove the current worktree's devcontainer |
+| `wt down <name>` | Stop and remove a named worktree's devcontainer |
+| `wt init` | Create a minimal `.devcontainer/` with SOCKS5 proxy support |
 | `wt proxy-port` | Print the SOCKS proxy port for the current worktree |
 | `wt proxy-port <name>` | Print the SOCKS proxy port for a named worktree |
 | `wt name` | Print the current worktree name |
