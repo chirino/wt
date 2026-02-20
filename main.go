@@ -24,6 +24,15 @@ import (
 //go:embed SKILL.md
 var wtExecSkill string
 
+//go:embed devcontainer/devcontainer.json
+var initDevcontainerJSON string
+
+//go:embed devcontainer/Dockerfile
+var initDockerfile string
+
+//go:embed devcontainer/supervisord.conf
+var initSupervisordConf string
+
 const worktreeDelimiter = "@"
 
 var verbose bool
@@ -33,6 +42,10 @@ func main() {
 		Use:   "wt",
 		Short: "Git worktree manager",
 		Long:  "A CLI tool to manage git worktrees as siblings of the main repository.",
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			cmd.SilenceUsage = true
+			return nil
+		},
 	}
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose output")
 
@@ -154,10 +167,9 @@ PowerShell:
 
 	// Name command
 	nameCmd := &cobra.Command{
-		Use:          "name",
-		Short:        "Print the name of the current worktree",
-		Args:         cobra.NoArgs,
-		SilenceUsage: true,
+		Use:   "name",
+		Short: "Print the name of the current worktree",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, err := resolveCurrentWorktreeName()
 			if err != nil {
@@ -170,10 +182,9 @@ PowerShell:
 
 	// Dir command
 	dirCmd := &cobra.Command{
-		Use:          "dir",
-		Short:        "Print the root directory of the current worktree or git project",
-		Args:         cobra.NoArgs,
-		SilenceUsage: true,
+		Use:   "dir",
+		Short: "Print the root directory of the current worktree or git project",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			root, err := getCurrentWorktreeRoot()
 			if err != nil {
@@ -188,7 +199,7 @@ PowerShell:
 	execCmd := &cobra.Command{
 		Use:               "exec [name] -- <command> [args...]",
 		Short:             "Execute a command in the worktree's devcontainer (default: current worktree)",
-		Args:              cobra.MinimumNArgs(1),
+		Args:              cobra.ArbitraryArgs,
 		RunE:              runExec,
 		ValidArgsFunction: worktreeArgsCompletion,
 	}
@@ -219,29 +230,15 @@ PowerShell:
 		Use:               "proxy-port [name]",
 		Short:             "Print the SOCKS proxy port for the worktree's devcontainer",
 		Args:              cobra.MaximumNArgs(1),
-		SilenceUsage:      true,
 		ValidArgsFunction: worktreeArgsCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var name string
-			var err error
-			if len(args) == 0 {
-				name, err = resolveCurrentWorktreeName()
-				if err != nil {
-					return err
-				}
-			} else {
-				name, err = resolveNameArg(args[0])
-				if err != nil {
-					return err
-				}
-			}
-			dir, err := resolveWorktreePath(name)
+			dir, _, err := resolveWorkspaceFolder(args)
 			if err != nil {
 				return err
 			}
-			port, err := readEnvVar(filepath.Join(dir, ".devcontainer", ".env"), "MICROSOCKS_PORT")
+			port, err := getProxyPort(dir)
 			if err != nil {
-				return fmt.Errorf("no proxy port configured for worktree %q", name)
+				return err
 			}
 			fmt.Println(port)
 			return nil
@@ -296,7 +293,25 @@ Then add to the project's CLAUDE.md:
 	}
 	curlCmd.Flags().SetInterspersed(false)
 
-	rootCmd.AddCommand(addCmd, lsCmd, rmCmd, cdCmd, codeCmd, chromeCmd, playwrightCmd, curlCmd, nameCmd, dirCmd, execCmd, upCmd, buildCmd, proxyPortCmd, skillCmd, completionCmd)
+	// Init command
+	initCmd := &cobra.Command{
+		Use:   "init",
+		Short: "Create a minimal .devcontainer/ with SOCKS5 proxy support",
+		Args:  cobra.NoArgs,
+		RunE:  runInit,
+	}
+	initCmd.Flags().Bool("force", false, "overwrite existing .devcontainer/ files")
+
+	// Down command
+	downCmd := &cobra.Command{
+		Use:               "down [name]",
+		Short:             "Stop and remove the devcontainer for a worktree",
+		Args:              cobra.MaximumNArgs(1),
+		RunE:              runDown,
+		ValidArgsFunction: worktreeArgsCompletion,
+	}
+
+	rootCmd.AddCommand(addCmd, lsCmd, rmCmd, cdCmd, codeCmd, chromeCmd, playwrightCmd, curlCmd, nameCmd, dirCmd, execCmd, upCmd, downCmd, buildCmd, proxyPortCmd, skillCmd, completionCmd, initCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -533,11 +548,6 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, "Warning: failed to write .devcontainer/.env: %v\n", err)
 		} else {
 			fmt.Fprintf(f, "GIT_WORKTREE=%s\n", name)
-			if port, err := findFreePort(); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to find free port: %v\n", err)
-			} else {
-				fmt.Fprintf(f, "MICROSOCKS_PORT=%d\n", port)
-			}
 			f.Close()
 		}
 	}
@@ -683,21 +693,9 @@ func findChromeBinary() (string, error) {
 }
 
 func runChrome(cmd *cobra.Command, args []string) error {
-	name, extra, err := resolveOptionalWorktreeArgs(args)
+	dir, extra, err := resolveWorkspaceFolder(args)
 	if err != nil {
 		return err
-	}
-	dir, err := resolveWorktreePath(name)
-	if err != nil {
-		return err
-	}
-	if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
-		if !confirmCreate(name) {
-			return fmt.Errorf("aborted")
-		}
-		if err := runAdd(cmd, []string{name}); err != nil {
-			return err
-		}
 	}
 
 	chromeBin, err := findChromeBinary()
@@ -720,9 +718,9 @@ func runChrome(cmd *cobra.Command, args []string) error {
 	}
 
 	// Require a proxy port so all traffic is forced through it.
-	port, err := readEnvVar(filepath.Join(dir, ".devcontainer", ".env"), "MICROSOCKS_PORT")
-	if err != nil || port == "" {
-		return fmt.Errorf("no proxy port configured for worktree %q", name)
+	port, err := getProxyPort(dir)
+	if err != nil {
+		return err
 	}
 	chromeArgs = append(chromeArgs, "--proxy-server=socks5://127.0.0.1:"+port)
 	// Proxy everything, including loopback targets, through SOCKS.
@@ -747,21 +745,9 @@ func runChrome(cmd *cobra.Command, args []string) error {
 }
 
 func runPlaywright(cmd *cobra.Command, args []string) error {
-	name, extra, err := resolveOptionalWorktreeArgs(args)
+	dir, extra, err := resolveWorkspaceFolder(args)
 	if err != nil {
 		return err
-	}
-	dir, err := resolveWorktreePath(name)
-	if err != nil {
-		return err
-	}
-	if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
-		if !confirmCreate(name) {
-			return fmt.Errorf("aborted")
-		}
-		if err := runAdd(cmd, []string{name}); err != nil {
-			return err
-		}
 	}
 
 	npx, err := exec.LookPath("npx")
@@ -770,9 +756,9 @@ func runPlaywright(cmd *cobra.Command, args []string) error {
 	}
 
 	// Require a proxy port so all traffic is forced through it.
-	port, err := readEnvVar(filepath.Join(dir, ".devcontainer", ".env"), "MICROSOCKS_PORT")
-	if err != nil || port == "" {
-		return fmt.Errorf("no proxy port configured for worktree %q", name)
+	port, err := getProxyPort(dir)
+	if err != nil {
+		return err
 	}
 
 	for i, arg := range extra {
@@ -800,21 +786,9 @@ func runPlaywright(cmd *cobra.Command, args []string) error {
 }
 
 func runCurl(cmd *cobra.Command, args []string) error {
-	name, extra, err := resolveOptionalWorktreeArgs(args)
+	dir, extra, err := resolveWorkspaceFolder(args)
 	if err != nil {
 		return err
-	}
-	dir, err := resolveWorktreePath(name)
-	if err != nil {
-		return err
-	}
-	if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
-		if !confirmCreate(name) {
-			return fmt.Errorf("aborted")
-		}
-		if err := runAdd(cmd, []string{name}); err != nil {
-			return err
-		}
 	}
 
 	curlBin, err := exec.LookPath("curl")
@@ -823,9 +797,9 @@ func runCurl(cmd *cobra.Command, args []string) error {
 	}
 
 	// Require a proxy port so all traffic is forced through it.
-	port, err := readEnvVar(filepath.Join(dir, ".devcontainer", ".env"), "MICROSOCKS_PORT")
-	if err != nil || port == "" {
-		return fmt.Errorf("no proxy port configured for worktree %q", name)
+	port, err := getProxyPort(dir)
+	if err != nil {
+		return err
 	}
 
 	for i, arg := range extra {
@@ -866,26 +840,24 @@ func normalizeLocalhostURL(arg string) string {
 
 
 func runExec(cmd *cobra.Command, args []string) error {
-	name, cmdArgs, err := resolveExecArgs(args)
+	dir, cmdArgs, err := resolveWorkspaceFolder(args)
 	if err != nil {
 		return err
 	}
-	if len(cmdArgs) == 0 {
-		return fmt.Errorf("no command specified")
-	}
-
-	dir, err := resolveWorktreePath(name)
-	if err != nil {
-		return err
-	}
-
 	devcontainerJSON := filepath.Join(dir, ".devcontainer", "devcontainer.json")
 	if _, err := os.Stat(devcontainerJSON); err == nil {
+		if len(cmdArgs) == 0 {
+			cmdArgs = []string{"/bin/sh", "-c", "command -v bash >/dev/null 2>&1 && exec bash || exec sh"}
+		}
 		dcArgs := append([]string{"exec", "--workspace-folder", dir}, cmdArgs...)
+		os.Setenv("DOCKER_CLI_HINTS", "false")
 		return sysExec("devcontainer", dcArgs)
 	}
 
 	// No devcontainer config — run the command directly in the worktree
+	if len(cmdArgs) == 0 {
+		return execShellInDir(dir)
+	}
 	if err := os.Chdir(dir); err != nil {
 		return fmt.Errorf("failed to change to directory %q: %w", dir, err)
 	}
@@ -922,11 +894,7 @@ func resolveExecArgs(args []string) (string, []string, error) {
 }
 
 func runUp(cmd *cobra.Command, args []string) error {
-	name, extra, err := resolveOptionalWorktreeArgs(args)
-	if err != nil {
-		return err
-	}
-	dir, err := resolveWorktreePath(name)
+	dir, extra, err := resolveWorkspaceFolder(args)
 	if err != nil {
 		return err
 	}
@@ -934,17 +902,106 @@ func runUp(cmd *cobra.Command, args []string) error {
 	return sysExec("devcontainer", dcArgs)
 }
 
-func runBuild(cmd *cobra.Command, args []string) error {
-	name, extra, err := resolveOptionalWorktreeArgs(args)
+func runDown(cmd *cobra.Command, args []string) error {
+	dir, _, err := resolveWorkspaceFolder(args)
 	if err != nil {
 		return err
 	}
-	dir, err := resolveWorktreePath(name)
+
+	// Find the container by devcontainer label
+	out, err := exec.Command("docker", "ps", "-aq", "--filter", "label=devcontainer.local_folder="+dir).Output()
+	if err != nil {
+		return fmt.Errorf("failed to query docker: %w", err)
+	}
+	containerID := strings.TrimSpace(strings.Split(string(out), "\n")[0])
+	if containerID == "" {
+		return fmt.Errorf("no devcontainer found for %q", filepath.Base(dir))
+	}
+
+	if verbose {
+		fmt.Fprintf(os.Stderr, "Removing container %s\n", containerID)
+	}
+	rmCmd := exec.Command("docker", "rm", "-f", containerID)
+	rmCmd.Stdout = os.Stdout
+	rmCmd.Stderr = os.Stderr
+	return rmCmd.Run()
+}
+
+func runBuild(cmd *cobra.Command, args []string) error {
+	dir, extra, err := resolveWorkspaceFolder(args)
 	if err != nil {
 		return err
 	}
 	dcArgs := append([]string{"build", "--workspace-folder", dir}, extra...)
 	return sysExec("devcontainer", dcArgs)
+}
+
+func runInit(cmd *cobra.Command, args []string) error {
+	force, _ := cmd.Flags().GetBool("force")
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	devcontainerDir := filepath.Join(cwd, ".devcontainer")
+
+	if info, err := os.Stat(devcontainerDir); err == nil && info.IsDir() {
+		if !force {
+			return fmt.Errorf(".devcontainer/ already exists; use --force to overwrite")
+		}
+		if verbose {
+			fmt.Fprintf(os.Stderr, "Overwriting existing .devcontainer/ directory\n")
+		}
+	}
+
+	if err := os.MkdirAll(devcontainerDir, 0755); err != nil {
+		return fmt.Errorf("failed to create .devcontainer/: %w", err)
+	}
+
+	type templateFile struct {
+		name    string
+		content string
+		perm    os.FileMode
+	}
+	files := []templateFile{
+		{"devcontainer.json", initDevcontainerJSON, 0644},
+		{"Dockerfile", initDockerfile, 0644},
+		{"supervisord.conf", initSupervisordConf, 0644},
+	}
+
+	for _, f := range files {
+		path := filepath.Join(devcontainerDir, f.name)
+		if verbose {
+			fmt.Fprintf(os.Stderr, "Writing .devcontainer/%s\n", f.name)
+		}
+		if err := os.WriteFile(path, []byte(f.content), f.perm); err != nil {
+			return fmt.Errorf("failed to write %s: %w", f.name, err)
+		}
+	}
+
+	fmt.Printf("Created .devcontainer/ in %s\n", cwd)
+	return nil
+}
+
+// resolveWorkspaceFolder resolves args to a workspace directory and remaining args.
+// Supports named worktrees and falls back to the main worktree when in it.
+func resolveWorkspaceFolder(args []string) (string, []string, error) {
+	name, extra, err := resolveOptionalWorktreeArgs(args)
+	if err == nil {
+		dir, err := resolveWorktreePath(name)
+		return dir, extra, err
+	}
+	// Fall back to main worktree
+	mainRoot, mainErr := getMainRepoRoot()
+	if mainErr != nil {
+		return "", nil, err
+	}
+	wtRoot, wtErr := getCurrentWorktreeRoot()
+	if wtErr != nil || wtRoot != mainRoot {
+		return "", nil, err
+	}
+	return mainRoot, args, nil
 }
 
 // resolveOptionalWorktreeArgs splits args into (worktreeName, remainingArgs).
@@ -1054,33 +1111,38 @@ func openDevcontainer(dir string) error {
 		}
 	}
 
-	// Add proxy setting if MICROSOCKS_PORT is configured
-	port, err := readEnvVar(filepath.Join(dir, ".devcontainer", ".env"), "MICROSOCKS_PORT")
-	if err == nil && port != "" {
-		codeArgs = append(codeArgs, fmt.Sprintf("--proxy-server=socks5://127.0.0.1:%s", port))
+	// Add proxy setting if devcontainer is running with a proxy port
+	port, err := getProxyPort(dir)
+	if err == nil {
+		codeArgs = append(codeArgs, "--proxy-server=socks5://127.0.0.1:"+port)
 	}
 
 	return sysExec("code", codeArgs)
 }
 
-func readEnvVar(path, key string) (string, error) {
-	data, err := os.ReadFile(path)
+// getProxyPort discovers the host port mapped to the SOCKS5 proxy (container port 1080)
+// by inspecting the running devcontainer for the given workspace directory.
+func getProxyPort(dir string) (string, error) {
+	out, err := exec.Command("docker", "ps", "-q", "--filter", "label=devcontainer.local_folder="+dir).Output()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to query docker: %w", err)
 	}
-	prefix := key + "="
-	value := ""
-	found := false
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, prefix) {
-			value = strings.TrimPrefix(line, prefix)
-			found = true
-		}
+	containerID := strings.TrimSpace(strings.Split(string(out), "\n")[0])
+	if containerID == "" {
+		return "", fmt.Errorf("no running devcontainer found for %q", filepath.Base(dir))
 	}
-	if found {
-		return value, nil
+
+	out, err = exec.Command("docker", "port", containerID, "1080").Output()
+	if err != nil {
+		return "", fmt.Errorf("no proxy port mapped for devcontainer %q", filepath.Base(dir))
 	}
-	return "", fmt.Errorf("%s not found in %s", key, path)
+	// Output format: "0.0.0.0:32768\n[::]:32768\n" — take the first line
+	addr := strings.TrimSpace(strings.Split(string(out), "\n")[0])
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse port from %q: %w", addr, err)
+	}
+	return port, nil
 }
 
 func validateWorktreeName(name string) error {
@@ -1107,15 +1169,6 @@ func confirmCreate(name string) bool {
 	return reply == "y" || reply == "yes"
 }
 
-func findFreePort() (int, error) {
-	l, err := net.Listen("tcp", ":0")
-	if err != nil {
-		return 0, err
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
-	return port, nil
-}
 
 func copyFile(src, dst string) error {
 	data, err := os.ReadFile(src)
