@@ -307,15 +307,9 @@ Examples:
 	skillCmd := &cobra.Command{
 		Use:     "skill",
 		GroupID: "setup",
-		Short:   "Print the Claude Code skill for worktree-isolated execution",
-		Long: `Print a Claude Code skill file that teaches Claude to use wt exec
-for commands that could conflict across worktrees.
-
-To import into a project:
-  wt skill > .claude/wt-exec.md
-
-Then add to the project's CLAUDE.md:
-  @.claude/wt-exec.md`,
+		Short:   "Print the ai assitant skill for worktree-isolated execution",
+		Long: `Print a ai assitant skill file that teaches your ai agent how to use wt exec
+for commands that could conflict across worktrees.`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Print(wtExecSkill)

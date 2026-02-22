@@ -47,7 +47,6 @@ VS Code's built-in browser and the `wt chrome` / `wt playwright` commands are pr
 - **SOCKS proxy per worktree** - Each devcontainer gets a dedicated proxy port for accessing container services from the host
 - **Shell navigation** - Quickly open a shell in any worktree
 - **Shell completion** - Tab completion for bash, zsh, fish, and PowerShell
-- **Claude Code skill** - Built-in skill file for AI-assisted development with worktree isolation
 
 ## Installation
 
@@ -178,20 +177,6 @@ wt proxy-port    # Print the SOCKS proxy port for the current worktree
 wt rm feature-xyz
 ```
 
-### Claude Code skill
-
-Generate a skill file that teaches Claude Code to use `wt exec` for commands that could conflict across worktrees:
-
-```bash
-wt skill > .claude/wt-exec.md
-```
-
-Then reference it from your project's `CLAUDE.md`:
-
-```
-@.claude/wt-exec.md
-```
-
 ## Command reference
 
 **Worktree commands**
@@ -230,7 +215,7 @@ Then reference it from your project's `CLAUDE.md`:
 
 | Command | Description |
 |---|---|
-| `wt skill` | Print the Claude Code skill file |
+| `wt skill` | Print the ai agent SKILL.md file for the wt command |
 | `wt completion <shell>` | Generate shell completion scripts |
 
 ## Shell completion
