@@ -41,7 +41,10 @@ func main() {
 	rootCmd := &cobra.Command{
 		Use:   "wt",
 		Short: "Git worktree manager",
-		Long:  "A CLI tool to manage git worktrees as siblings of the main repository.",
+		Long: `wt manages git worktrees as sibling directories of the main repository.
+Each worktree lives at ../repo@name and can run its own isolated devcontainer
+with its own network, ports, and SOCKS5 proxy for accessing container services
+from the host.`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
 			return nil
@@ -49,12 +52,29 @@ func main() {
 	}
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose output")
 
+	rootCmd.AddGroup(
+		&cobra.Group{ID: "worktree", Title: "Worktree commands:"},
+		&cobra.Group{ID: "devcontainer", Title: "Devcontainer commands:"},
+		&cobra.Group{ID: "http", Title: "Socks5 Proxy & Browser commands:"},
+		&cobra.Group{ID: "setup", Title: "Setup commands:"},
+	)
+
 	// Add command
 	addCmd := &cobra.Command{
-		Use:   "add <name>",
-		Short: "Create a new worktree (sibling of main repo, e.g. repo@name)",
-		Args:  cobra.ExactArgs(1),
-		RunE:  runAdd,
+		Use:     "add <name>",
+		Short:   "Create a new worktree",
+		GroupID: "worktree",
+		Long: `Creates a new git worktree at ../repo@<name> (a sibling of the main repo),
+detached at the current HEAD.
+
+Automatically:
+  - Fetches from origin (if configured)
+  - Copies .env and .envrc from the current worktree
+  - Copies .devcontainer/.env if present
+  - Appends GIT_WORKTREE=<name> to .devcontainer/.env
+  - Runs 'direnv allow' if .envrc is present`,
+		Args: cobra.ExactArgs(1),
+		RunE: runAdd,
 	}
 
 	// List command
@@ -64,15 +84,21 @@ func main() {
 		Short:   "List all sibling worktrees",
 		Args:    cobra.NoArgs,
 		RunE:    runList,
+		GroupID: "worktree",
 	}
 
 	// Remove command
 	rmCmd := &cobra.Command{
 		Use:     "rm <name> [git-args...]",
 		Aliases: []string{"remove"},
-		Short:   "Remove a worktree",
-		Args:    cobra.MinimumNArgs(1),
-		RunE:    runRemove,
+		Short:   "Remove a worktree and clean up its directory",
+		GroupID: "worktree",
+		Long: `Removes the named worktree using 'git worktree remove', then deletes any
+remaining files in the worktree directory (e.g. .vscode-profile/, untracked files).
+
+Extra arguments are passed through to 'git worktree remove' (e.g. --force).`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: runRemove,
 		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 			if len(args) != 0 {
 				return nil, cobra.ShellCompDirectiveNoFileComp
@@ -91,8 +117,13 @@ func main() {
 
 	// CD command
 	cdCmd := &cobra.Command{
-		Use:               "cd [name]",
-		Short:             "Open a new shell in the worktree directory",
+		Use:     "cd [name]",
+		Short:   "Open a shell in the worktree directory",
+		GroupID: "worktree",
+		Long: `Opens a new interactive shell in the named worktree directory.
+Without a name, opens a shell in the main repo root.
+
+Use -c to auto-create the worktree if it doesn't exist.`,
 		Args:              cobra.MaximumNArgs(1),
 		RunE:              runCD,
 		ValidArgsFunction: worktreeArgsCompletion,
@@ -101,8 +132,20 @@ func main() {
 
 	// Code command
 	codeCmd := &cobra.Command{
-		Use:               "code [name]",
-		Short:             "Open the worktree directory in VS Code",
+		Use:     "code [name]",
+		Short:   "Open the worktree in VS Code",
+		GroupID: "worktree",
+		Long: `Opens the worktree directory in VS Code.
+
+If the worktree has a .devcontainer/devcontainer.json and the devcontainer CLI
+is available, this will:
+  1. Run 'devcontainer up' to start the container
+  2. Attach VS Code to the running container
+  3. Use a per-worktree VS Code profile (.vscode-profile/) to isolate settings
+  4. Route VS Code network traffic through the worktree's SOCKS5 proxy
+
+Without a devcontainer, opens the directory in VS Code directly.
+Use -c to auto-create the worktree if it doesn't exist.`,
 		Args:              cobra.MaximumNArgs(1),
 		RunE:              runCode,
 		ValidArgsFunction: worktreeArgsCompletion,
@@ -111,8 +154,9 @@ func main() {
 
 	// Completion command
 	completionCmd := &cobra.Command{
-		Use:   "completion [bash|zsh|fish|powershell]",
-		Short: "Generate shell completion scripts",
+		Use:     "completion [bash|zsh|fish|powershell]",
+		Short:   "Generate shell completion scripts",
+		GroupID: "setup",
 		Long: `Generate shell completion scripts for wt.
 
 To load completions:
@@ -167,9 +211,10 @@ PowerShell:
 
 	// Name command
 	nameCmd := &cobra.Command{
-		Use:   "name",
-		Short: "Print the name of the current worktree",
-		Args:  cobra.NoArgs,
+		Use:     "name",
+		Short:   "Print the name of the current worktree",
+		Args:    cobra.NoArgs,
+		GroupID: "worktree",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, err := resolveCurrentWorktreeName()
 			if err != nil {
@@ -182,9 +227,10 @@ PowerShell:
 
 	// Dir command
 	dirCmd := &cobra.Command{
-		Use:   "dir",
-		Short: "Print the root directory of the current worktree or git project",
-		Args:  cobra.NoArgs,
+		Use:     "dir",
+		Short:   "Print the root directory of the current worktree or git project",
+		Args:    cobra.NoArgs,
+		GroupID: "worktree",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			root, err := getCurrentWorktreeRoot()
 			if err != nil {
@@ -197,8 +243,20 @@ PowerShell:
 
 	// Exec command
 	execCmd := &cobra.Command{
-		Use:               "exec [name] -- <command> [args...]",
-		Short:             "Execute a command in the worktree's devcontainer (default: current worktree)",
+		Use:     "exec [name] -- <command> [args...]",
+		Short:   "Run a command inside the worktree's devcontainer",
+		GroupID: "devcontainer",
+		Long: `Runs a command inside the worktree's devcontainer using 'devcontainer exec'.
+Use '--' to separate the worktree name from the command.
+
+Without a command, opens an interactive shell inside the container.
+If the worktree has no .devcontainer/devcontainer.json, the command is run
+directly in the worktree directory instead.
+
+Examples:
+  wt exec                           # interactive shell in current worktree
+  wt exec -- go test ./...          # run tests in current worktree's container
+  wt exec feature -- npm run dev    # run dev server in a named worktree`,
 		Args:              cobra.ArbitraryArgs,
 		RunE:              runExec,
 		ValidArgsFunction: worktreeArgsCompletion,
@@ -208,7 +266,8 @@ PowerShell:
 	// Up command
 	upCmd := &cobra.Command{
 		Use:               "up [name] [devcontainer-args...]",
-		Short:             "Start the worktree's devcontainer (default: current worktree)",
+		Short:             "Start the worktree's devcontainer",
+		GroupID:           "devcontainer",
 		Args:              cobra.ArbitraryArgs,
 		RunE:              runUp,
 		ValidArgsFunction: worktreeArgsCompletion,
@@ -218,7 +277,8 @@ PowerShell:
 	// Build command
 	buildCmd := &cobra.Command{
 		Use:               "build [name] [devcontainer-args...]",
-		Short:             "Build the worktree's devcontainer (default: current worktree)",
+		Short:             "Build the worktree's devcontainer image",
+		GroupID:           "devcontainer",
 		Args:              cobra.ArbitraryArgs,
 		RunE:              runBuild,
 		ValidArgsFunction: worktreeArgsCompletion,
@@ -228,8 +288,9 @@ PowerShell:
 	// Proxy-port command
 	proxyPortCmd := &cobra.Command{
 		Use:               "proxy-port [name]",
-		Short:             "Print the SOCKS proxy port for the worktree's devcontainer",
+		Short:             "Print the host port of the worktree's SOCKS5 proxy",
 		Args:              cobra.MaximumNArgs(1),
+		GroupID:           "http",
 		ValidArgsFunction: worktreeArgsCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir, _, err := resolveWorkspaceFolder(args)
@@ -247,8 +308,9 @@ PowerShell:
 
 	// Skill command
 	skillCmd := &cobra.Command{
-		Use:   "skill",
-		Short: "Print the Claude Code skill for worktree-isolated execution",
+		Use:     "skill",
+		GroupID: "setup",
+		Short:   "Print the Claude Code skill for worktree-isolated execution",
 		Long: `Print a Claude Code skill file that teaches Claude to use wt exec
 for commands that could conflict across worktrees.
 
@@ -265,8 +327,21 @@ Then add to the project's CLAUDE.md:
 
 	// Chrome command
 	chromeCmd := &cobra.Command{
-		Use:               "chrome [name] [-- chrome-args...]",
-		Short:             "Open a Chrome browser with per-worktree profile and proxy settings",
+		Use:     "chrome [name] [-- chrome-args...]",
+		Short:   "Open Chrome with the worktree's proxy and an isolated profile",
+		GroupID: "http",
+		Long: `Launches Chrome pre-configured with:
+  - A per-worktree user profile (.chrome-profile/) for session isolation
+  - The worktree's SOCKS5 proxy so all traffic routes through the container
+
+Opens the devcontainer's default HTTP/HTTPS URL if no URL is specified.
+Always use 127.0.0.1 instead of localhost — the SOCKS5 proxy cannot resolve
+'localhost' reliably.
+
+Examples:
+  wt chrome                               # open default URL
+  wt chrome -- http://127.0.0.1:3000     # open a specific URL
+  wt chrome feature -- http://127.0.0.1:8080`,
 		Args:              cobra.ArbitraryArgs,
 		RunE:              runChrome,
 		ValidArgsFunction: worktreeArgsCompletion,
@@ -275,8 +350,17 @@ Then add to the project's CLAUDE.md:
 
 	// Playwright command
 	playwrightCmd := &cobra.Command{
-		Use:               "playwright [name] [-- playwright-args...]",
-		Short:             "Open a browser with Playwright using per-worktree proxy settings",
+		Use:     "playwright [name] [-- playwright-args...]",
+		Short:   "Open a Playwright browser with the worktree's proxy",
+		GroupID: "http",
+		Long: `Launches a browser via 'npx playwright open' with the worktree's SOCKS5 proxy
+configured, so the browser can reach services running inside the container.
+
+Always use 127.0.0.1 instead of localhost in URLs.
+
+Examples:
+  wt playwright                               # open default URL
+  wt playwright -- http://127.0.0.1:3000     # open a specific URL`,
 		Args:              cobra.ArbitraryArgs,
 		RunE:              runPlaywright,
 		ValidArgsFunction: worktreeArgsCompletion,
@@ -285,8 +369,18 @@ Then add to the project's CLAUDE.md:
 
 	// Curl command
 	curlCmd := &cobra.Command{
-		Use:               "curl [name] [-- curl-args...]",
-		Short:             "Run curl with per-worktree proxy settings",
+		Use:     "curl [name] [-- curl-args...]",
+		Short:   "Run curl through the worktree's SOCKS5 proxy",
+		GroupID: "http",
+		Long: `Runs curl with the worktree's SOCKS5 proxy automatically configured,
+so requests reach services running inside the devcontainer.
+
+Always use 127.0.0.1 instead of localhost in URLs.
+
+Examples:
+  wt curl -- http://127.0.0.1:8080/api
+  wt curl -- -X POST -d '{"key":"val"}' http://127.0.0.1:8080/api
+  wt curl feature -- http://127.0.0.1:8080`,
 		Args:              cobra.ArbitraryArgs,
 		RunE:              runCurl,
 		ValidArgsFunction: worktreeArgsCompletion,
@@ -295,23 +389,50 @@ Then add to the project's CLAUDE.md:
 
 	// Init command
 	initCmd := &cobra.Command{
-		Use:   "init",
-		Short: "Create a minimal .devcontainer/ with SOCKS5 proxy support",
-		Args:  cobra.NoArgs,
-		RunE:  runInit,
+		Use:     "init",
+		Short:   "Scaffold a .devcontainer/ with SOCKS5 proxy support",
+		GroupID: "http",
+		Long: `Creates a .devcontainer/ directory in the current project with:
+  - devcontainer.json   devcontainer config with SOCKS5 proxy port mapping
+  - Dockerfile          base image with supervisord and microsocks installed
+  - supervisord.conf    starts the SOCKS5 proxy daemon on container start
+
+Use --force to overwrite existing files.`,
+		Args: cobra.NoArgs,
+		RunE: runInit,
 	}
 	initCmd.Flags().Bool("force", false, "overwrite existing .devcontainer/ files")
 
 	// Down command
 	downCmd := &cobra.Command{
 		Use:               "down [name]",
-		Short:             "Stop and remove the devcontainer for a worktree",
+		Short:             "Stop and remove the worktree's devcontainer",
+		GroupID:           "devcontainer",
 		Args:              cobra.MaximumNArgs(1),
 		RunE:              runDown,
 		ValidArgsFunction: worktreeArgsCompletion,
 	}
 
-	rootCmd.AddCommand(addCmd, lsCmd, rmCmd, cdCmd, codeCmd, chromeCmd, playwrightCmd, curlCmd, nameCmd, dirCmd, execCmd, upCmd, downCmd, buildCmd, proxyPortCmd, skillCmd, completionCmd, initCmd)
+	// Bounce command
+	bounceCmd := &cobra.Command{
+		Use:     "bounce [name]",
+		Short:   "Recreate the worktree's devcontainer",
+		GroupID: "devcontainer",
+		Long: `Stops and removes the devcontainer, then starts a fresh one.
+Equivalent to running 'wt down' followed by 'wt up'.
+
+Useful after changes to .devcontainer/ configuration.`,
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: worktreeArgsCompletion,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := runDown(cmd, args); err != nil {
+				return err
+			}
+			return runUp(cmd, args)
+		},
+	}
+
+	rootCmd.AddCommand(addCmd, lsCmd, rmCmd, cdCmd, codeCmd, chromeCmd, playwrightCmd, curlCmd, nameCmd, dirCmd, execCmd, upCmd, downCmd, buildCmd, bounceCmd, proxyPortCmd, skillCmd, completionCmd, initCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -844,7 +965,6 @@ func normalizeLocalhostURL(arg string) string {
 	return parsed.String()
 }
 
-
 func runExec(cmd *cobra.Command, args []string) error {
 	dir, cmdArgs, err := resolveWorkspaceFolder(args)
 	if err != nil {
@@ -852,6 +972,9 @@ func runExec(cmd *cobra.Command, args []string) error {
 	}
 	devcontainerJSON := filepath.Join(dir, ".devcontainer", "devcontainer.json")
 	if _, err := os.Stat(devcontainerJSON); err == nil {
+		if err := requireDevcontainerCLI(); err != nil {
+			return err
+		}
 		if len(cmdArgs) == 0 {
 			cmdArgs = []string{"/bin/sh", "-c", "command -v bash >/dev/null 2>&1 && exec bash || exec sh"}
 		}
@@ -900,6 +1023,9 @@ func resolveExecArgs(args []string) (string, []string, error) {
 }
 
 func runUp(cmd *cobra.Command, args []string) error {
+	if err := requireDevcontainerCLI(); err != nil {
+		return err
+	}
 	dir, extra, err := resolveWorkspaceFolder(args)
 	if err != nil {
 		return err
@@ -934,6 +1060,9 @@ func runDown(cmd *cobra.Command, args []string) error {
 }
 
 func runBuild(cmd *cobra.Command, args []string) error {
+	if err := requireDevcontainerCLI(); err != nil {
+		return err
+	}
 	dir, extra, err := resolveWorkspaceFolder(args)
 	if err != nil {
 		return err
@@ -1066,6 +1195,9 @@ func setupVSCodeProfile(userDataDir string) {
 }
 
 func openDevcontainer(dir string) error {
+	if err := requireDevcontainerCLI(); err != nil {
+		return err
+	}
 	// Start the devcontainer, streaming output while capturing it for JSON parsing
 	var buf bytes.Buffer
 	upCmd := exec.Command("devcontainer", "up", "--workspace-folder", dir)
@@ -1235,7 +1367,6 @@ func confirmCreate(name string) bool {
 	return reply == "y" || reply == "yes"
 }
 
-
 func copyFile(src, dst string) error {
 	data, err := os.ReadFile(src)
 	if err != nil {
@@ -1271,6 +1402,22 @@ func sysExec(argv0 string, args []string) error {
 		return fmt.Errorf("failed to find %q: %w", argv0, err)
 	}
 	return syscall.Exec(path, append([]string{argv0}, args...), os.Environ())
+}
+
+const devcontainerInstallHint = `the devcontainer CLI is not installed.
+
+Install options:
+  1. npm:     npm install -g @devcontainers/cli
+  2. VS Code: open the command palette and run "Dev Containers: Install devcontainer CLI"
+
+Then verify with:
+  devcontainer --version`
+
+func requireDevcontainerCLI() error {
+	if _, err := exec.LookPath("devcontainer"); err != nil {
+		return fmt.Errorf("%s", devcontainerInstallHint)
+	}
+	return nil
 }
 
 func execShellInDir(dir string) error {

@@ -114,6 +114,12 @@ Use `.` to refer to the current worktree:
 wt exec . -- go test ./...
 ```
 
+Recreate the devcontainer from scratch (down + up):
+
+```bash
+wt bounce feature-xyz
+```
+
 ### Access container services from the host
 
 Each devcontainer gets a dedicated SOCKS5 proxy. Get the port with:
@@ -160,20 +166,42 @@ Then reference it from your project's `CLAUDE.md`:
 
 ## Command reference
 
+**Worktree commands**
+
 | Command | Description |
 |---|---|
 | `wt add <name>` | Create a new worktree |
 | `wt ls` | List all sibling worktrees |
+| `wt rm <name> [git-args...]` | Remove a worktree and clean up its directory |
 | `wt cd [name]` | Open a shell in the worktree directory |
 | `wt code [name]` | Open the worktree in VS Code |
-| `wt rm <name>` | Remove a worktree |
-| `wt up <name>` | Start the worktree's devcontainer |
-| `wt build <name>` | Build the worktree's devcontainer |
-| `wt exec <name> -- <cmd>` | Run a command in the worktree's devcontainer |
-| `wt curl [name] -- <curl-args>` | Run curl with the worktree SOCKS proxy |
-| `wt proxy-port [name]` | Print the SOCKS proxy port |
 | `wt name` | Print the current worktree name |
 | `wt dir` | Print the current worktree root directory |
+
+**Devcontainer commands**
+
+| Command | Description |
+|---|---|
+| `wt up [name] [devcontainer-args...]` | Start the worktree's devcontainer |
+| `wt down [name]` | Stop and remove the worktree's devcontainer |
+| `wt bounce [name]` | Recreate the worktree's devcontainer (down + up) |
+| `wt build [name] [devcontainer-args...]` | Build the worktree's devcontainer image |
+| `wt exec [name] -- <cmd> [args...]` | Run a command inside the worktree's devcontainer |
+
+**SOCKS5 Proxy & Browser commands**
+
+| Command | Description |
+|---|---|
+| `wt init` | Scaffold a `.devcontainer/` with SOCKS5 proxy support |
+| `wt proxy-port [name]` | Print the host port of the worktree's SOCKS5 proxy |
+| `wt chrome [name] [-- chrome-args...]` | Open Chrome with the worktree's proxy and an isolated profile |
+| `wt playwright [name] [-- playwright-args...]` | Open a Playwright browser with the worktree's proxy |
+| `wt curl [name] [-- curl-args...]` | Run curl through the worktree's SOCKS5 proxy |
+
+**Setup commands**
+
+| Command | Description |
+|---|---|
 | `wt skill` | Print the Claude Code skill file |
 | `wt completion <shell>` | Generate shell completion scripts |
 

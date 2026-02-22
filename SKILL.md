@@ -61,13 +61,16 @@ wt chrome -- http://127.0.0.1:8080
 **Important:** Always use `127.0.0.1` instead of `localhost` in URLs.
 The SOCKS5 proxy cannot resolve `localhost` reliably.
 
-For CLI access, use the proxy port directly:
+For CLI access, use `wt curl`:
 
 ```sh
-# curl through the proxy
-curl --proxy socks5h://127.0.0.1:$(wt proxy-port) http://127.0.0.1:8080
+wt curl -- http://127.0.0.1:8080
+wt curl -- -X POST http://127.0.0.1:8080/api/data
+```
 
-# Or set the environment variable for tools that support it
+Or set the proxy manually for tools that support it:
+
+```sh
 export ALL_PROXY=socks5h://127.0.0.1:$(wt proxy-port)
 ```
 
@@ -79,26 +82,34 @@ Before running `wt exec`, make sure the devcontainer is up:
 wt up
 ```
 
+To recreate it from scratch (e.g. after config changes):
+
+```sh
+wt bounce
+```
+
 ## Quick reference
 
 All commands default to the current worktree when no name is given.
 
 | Command | Purpose |
 |---|---|
-| `wt exec -- <cmd>` | Run a command in the current worktree's devcontainer |
-| `wt exec <name> -- <cmd>` | Run a command in a named worktree's devcontainer |
-| `wt up` | Start the current worktree's devcontainer |
-| `wt up <name>` | Start a named worktree's devcontainer |
-| `wt build` | Build the current worktree's devcontainer |
-| `wt build <name>` | Build a named worktree's devcontainer |
-| `wt chrome` | Open Chrome with proxy to the current worktree's devcontainer |
-| `wt chrome <name>` | Open Chrome with proxy to a named worktree's devcontainer |
+| `wt exec -- <cmd> [args...]` | Run a command in the current worktree's devcontainer |
+| `wt exec <name> -- <cmd> [args...]` | Run a command in a named worktree's devcontainer |
+| `wt up [devcontainer-args...]` | Start the current worktree's devcontainer |
+| `wt up <name> [devcontainer-args...]` | Start a named worktree's devcontainer |
+| `wt build [devcontainer-args...]` | Build the current worktree's devcontainer |
+| `wt build <name> [devcontainer-args...]` | Build a named worktree's devcontainer |
+| `wt chrome [-- chrome-args...]` | Open Chrome with proxy to the current worktree's devcontainer |
+| `wt chrome <name> [-- chrome-args...]` | Open Chrome with proxy to a named worktree's devcontainer |
 | `wt curl -- <curl-args>` | Run curl with proxy to the current worktree's devcontainer |
 | `wt curl <name> -- <curl-args>` | Run curl with proxy to a named worktree's devcontainer |
-| `wt playwright` | Open a Playwright browser with proxy to the current worktree's devcontainer |
-| `wt playwright <name>` | Open a Playwright browser with proxy to a named worktree's devcontainer |
+| `wt playwright [-- playwright-args...]` | Open a Playwright browser with proxy to the current worktree's devcontainer |
+| `wt playwright <name> [-- playwright-args...]` | Open a Playwright browser with proxy to a named worktree's devcontainer |
 | `wt down` | Stop and remove the current worktree's devcontainer |
 | `wt down <name>` | Stop and remove a named worktree's devcontainer |
+| `wt bounce` | Recreate the current worktree's devcontainer (down + up) |
+| `wt bounce <name>` | Recreate a named worktree's devcontainer (down + up) |
 | `wt init` | Create a minimal `.devcontainer/` with SOCKS5 proxy support |
 | `wt proxy-port` | Print the SOCKS proxy port for the current worktree |
 | `wt proxy-port <name>` | Print the SOCKS proxy port for a named worktree |
