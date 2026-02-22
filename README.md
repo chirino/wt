@@ -13,6 +13,31 @@ Git worktrees let you check out multiple branches at the same time, each in its 
 
 `wt` makes worktrees easy to manage and adds devcontainer support so each worktree can run in its own isolated container with its own network, ports, and services.
 
+## Why a SOCKS proxy instead of port forwarding?
+
+When running multiple worktrees simultaneously, each with its own devcontainer, port forwarding quickly becomes a problem. If every container runs a web server on port 8080, you can only forward one of them to `localhost:8080` at a time — the rest require manual remapping to different host ports, which breaks hardcoded URLs, OAuth redirect URIs, and service-to-service links.
+
+`wt` solves this by running a SOCKS5 proxy inside each devcontainer and exposing it on a unique host port. Because SOCKS5 proxies the TCP connection itself rather than forwarding a single port, you can reach **any port on any service** inside the container through a single DYNAMIC proxy port — without remapping anything. The services inside the container keep their natural ports (8080, 5432, 6379, etc.) and your host-side tools connect through the proxy instead:
+
+```bash
+curl --proxy socks5h://127.0.0.1:$(wt proxy-port) http://127.0.0.1:8080
+```
+
+The `socks5h` scheme tells curl to resolve the hostname inside the container, so names like `localhost` or internal DNS names refer to the container's network, not the host's. This means:
+
+- **No port conflicts** between worktrees — each proxy listens on a different host port, and container-side ports never need to change
+- **All services reachable** — databases, APIs, and UIs on any port are accessible through one proxy entry point
+- **URLs stay canonical** — no remapping means OAuth callbacks, API base URLs, and inter-service addresses work exactly as they do inside the container
+
+VS Code's built-in browser and the `wt chrome` / `wt playwright` commands are pre-configured to route traffic through the worktree's proxy automatically.
+
+## Why sibling directories?
+
+`wt` places worktrees as siblings of the main repo rather than inside it (e.g., `myproject@feature` next to `myproject/`). This matters for several practical reasons:
+
+- **Git works inside the devcontainer** - If the devcontainer mounts the parent directory of the repo (a common pattern to make all sibling worktrees visible inside the container), git commands work correctly in every worktree because each one is a proper git worktree under that shared parent mount
+- **Clear visual grouping** - In your file manager or shell, all worktrees for a project appear together, named `project@branch`, making it obvious what each directory is
+
 ## Features
 
 - **Sibling directory layout** - Worktrees are created as siblings of the main repo (e.g., `myproject@feature` next to `myproject/`)
