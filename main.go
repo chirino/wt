@@ -69,10 +69,7 @@ detached at the current HEAD.
 
 Automatically:
   - Fetches from origin (if configured)
-  - Copies .env and .envrc from the current worktree
-  - Copies .devcontainer/.env if present
-  - Appends GIT_WORKTREE=<name> to .devcontainer/.env
-  - Runs 'direnv allow' if .envrc is present`,
+  - Copies all .env* files from the root of the current worktree`,
 		Args: cobra.ExactArgs(1),
 		RunE: runAdd,
 	}
@@ -391,7 +388,7 @@ Examples:
 	initCmd := &cobra.Command{
 		Use:     "init",
 		Short:   "Scaffold a .devcontainer/ with SOCKS5 proxy support",
-		GroupID: "http",
+		GroupID: "devcontainer",
 		Long: `Creates a .devcontainer/ directory in the current project with:
   - devcontainer.json   devcontainer config with SOCKS5 proxy port mapping
   - Dockerfile          base image with supervisord and microsocks installed
@@ -628,48 +625,13 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("git worktree add failed: %w", err)
 	}
 
-	// Copy .env if exists
-	envSrc := filepath.Join(projectDir, ".env")
-	if _, err := os.Stat(envSrc); err == nil {
-		if err := copyFile(envSrc, filepath.Join(worktreePath, ".env")); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to copy .env: %v\n", err)
-		}
-	}
-
-	// Copy .envrc if exists and run direnv allow
-	envrcSrc := filepath.Join(projectDir, ".envrc")
-	if _, err := os.Stat(envrcSrc); err == nil {
-		if err := copyFile(envrcSrc, filepath.Join(worktreePath, ".envrc")); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to copy .envrc: %v\n", err)
-		} else {
-			direnvCmd := exec.Command("direnv", "allow")
-			direnvCmd.Dir = worktreePath
-			direnvCmd.Stdout = os.Stdout
-			direnvCmd.Stderr = os.Stderr
-			_ = direnvCmd.Run() // Ignore error if direnv not installed
-		}
-	}
-
-	// Set up .devcontainer/.env if .devcontainer dir exists in the worktree
-	devcontainerDir := filepath.Join(worktreePath, ".devcontainer")
-	if _, err := os.Stat(devcontainerDir); err == nil {
-		devEnvPath := filepath.Join(devcontainerDir, ".env")
-
-		// Copy .devcontainer/.env from source project if it exists
-		srcDevEnv := filepath.Join(projectDir, ".devcontainer", ".env")
-		if _, err := os.Stat(srcDevEnv); err == nil {
-			if err := copyFile(srcDevEnv, devEnvPath); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to copy .devcontainer/.env: %v\n", err)
-			}
-		}
-
-		// Append worktree-specific env vars
-		f, err := os.OpenFile(devEnvPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to write .devcontainer/.env: %v\n", err)
-		} else {
-			fmt.Fprintf(f, "GIT_WORKTREE=%s\n", name)
-			f.Close()
+	// Copy all .env* files from root of project
+	envFiles, _ := filepath.Glob(filepath.Join(projectDir, ".env*"))
+	for _, src := range envFiles {
+		base := filepath.Base(src)
+		dst := filepath.Join(worktreePath, base)
+		if err := copyFile(src, dst); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to copy %s: %v\n", base, err)
 		}
 	}
 
@@ -1233,11 +1195,7 @@ func openDevcontainer(dir string) error {
 	hexID := hex.EncodeToString([]byte(result.ContainerID))
 	folderURI := fmt.Sprintf("vscode-remote://attached-container+%s%s", hexID, result.RemoteWorkspaceFolder)
 
-	userDataDir := filepath.Join(dir, ".vscode-profile")
-	setupVSCodeProfile(userDataDir)
-
 	codeArgs := []string{
-		"--user-data-dir", userDataDir,
 		"--folder-uri", folderURI,
 	}
 
@@ -1249,10 +1207,16 @@ func openDevcontainer(dir string) error {
 		}
 	}
 
-	// Add proxy setting if devcontainer is running with a proxy port
+	// If the devcontainer has a SOCKS proxy, use a per-worktree VS Code profile
+	// and route VS Code traffic through it.
 	port, err := getProxyPort(dir)
 	if err == nil {
-		codeArgs = append(codeArgs, "--proxy-server=socks5://127.0.0.1:"+port)
+		userDataDir := filepath.Join(dir, ".vscode-profile")
+		setupVSCodeProfile(userDataDir)
+		codeArgs = append(codeArgs,
+			"--user-data-dir", userDataDir,
+			"--proxy-server=socks5://127.0.0.1:"+port,
+		)
 	}
 
 	return sysExec("code", codeArgs)

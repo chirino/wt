@@ -16,8 +16,7 @@ Git worktrees let you check out multiple branches at the same time, each in its 
 ## Features
 
 - **Sibling directory layout** - Worktrees are created as siblings of the main repo (e.g., `myproject@feature` next to `myproject/`)
-- **Environment file copying** - Automatically copies `.env`, `.envrc`, and `.devcontainer/.env` to new worktrees
-- **Direnv integration** - Runs `direnv allow` when `.envrc` is present
+- **Environment file copying** - Automatically copies all `.env*` files from the project root to new worktrees
 - **Devcontainer support** - Start, build, and exec into per-worktree devcontainers
 - **VS Code integration** - Open worktrees in VS Code with devcontainer attach and per-worktree profile isolation
 - **SOCKS proxy per worktree** - Each devcontainer gets a dedicated proxy port for accessing container services from the host
@@ -48,10 +47,7 @@ wt add feature-xyz
 ```
 
 Creates a worktree at `../myproject@feature-xyz` (sibling to your main repo) detached at the current HEAD. Automatically:
-- Copies `.env` and `.envrc` from the current project
-- Copies `.devcontainer/.env` if present
-- Assigns a free port as `MICROSOCKS_PORT` for the devcontainer proxy
-- Sets `GIT_WORKTREE=feature-xyz` in the devcontainer environment
+- Copies all `.env*` files from the root of the current project
 
 ### List worktrees
 
@@ -67,12 +63,6 @@ wt cd feature-xyz
 
 Opens a new shell in the worktree directory. Without arguments, opens a shell in the main repo root.
 
-Use `-c` to auto-create the worktree if it doesn't exist:
-
-```bash
-wt cd -c new-feature
-```
-
 ### Open in VS Code
 
 ```bash
@@ -82,12 +72,19 @@ wt code feature-xyz
 If the worktree has a `.devcontainer/devcontainer.json`, this will:
 1. Run `devcontainer up` to start the container
 2. Open VS Code attached to the running container
-3. Use a per-worktree VS Code profile (`.vscode-profile/`) to avoid settings conflicts
-4. Configure the SOCKS proxy for VS Code's network access
+3. If the devcontainer has a SOCKS5 proxy running (port 1080):
+   - Use a per-worktree VS Code profile (`.vscode-profile/`) to avoid settings conflicts
+   - Route VS Code network traffic through the proxy
 
 Without a devcontainer, it opens the directory in VS Code directly. Use `-c` to auto-create.
 
 ### Devcontainer commands
+
+Scaffold a `.devcontainer/` with SOCKS5 proxy support:
+
+```bash
+wt init
+```
 
 Start a worktree's devcontainer:
 
@@ -101,10 +98,16 @@ Build a worktree's devcontainer:
 wt build feature-xyz
 ```
 
+Start a shell inside the devcontainer:
+
+```bash
+wt exec
+```
+
 Run a command inside the devcontainer:
 
 ```bash
-wt exec feature-xyz -- make test
+wt exec -- make test
 wt exec feature-xyz -- npm run dev
 ```
 
@@ -182,6 +185,7 @@ Then reference it from your project's `CLAUDE.md`:
 
 | Command | Description |
 |---|---|
+| `wt init` | Scaffold a `.devcontainer/` with SOCKS5 proxy support |
 | `wt up [name] [devcontainer-args...]` | Start the worktree's devcontainer |
 | `wt down [name]` | Stop and remove the worktree's devcontainer |
 | `wt bounce [name]` | Recreate the worktree's devcontainer (down + up) |
@@ -192,7 +196,6 @@ Then reference it from your project's `CLAUDE.md`:
 
 | Command | Description |
 |---|---|
-| `wt init` | Scaffold a `.devcontainer/` with SOCKS5 proxy support |
 | `wt proxy-port [name]` | Print the host port of the worktree's SOCKS5 proxy |
 | `wt chrome [name] [-- chrome-args...]` | Open Chrome with the worktree's proxy and an isolated profile |
 | `wt playwright [name] [-- playwright-args...]` | Open a Playwright browser with the worktree's proxy |
