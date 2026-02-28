@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unsafe"
 
 	"github.com/spf13/cobra"
 )
@@ -926,6 +927,11 @@ func runExec(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(cmdArgs) > 0 {
+		if err := detachStdinIfBackgroundTTY(); err != nil {
+			return err
+		}
+	}
 	devcontainerJSON := filepath.Join(dir, ".devcontainer", "devcontainer.json")
 	if _, err := os.Stat(devcontainerJSON); err == nil {
 		if err := requireDevcontainerCLI(); err != nil {
@@ -1360,6 +1366,37 @@ func sysExec(argv0 string, args []string) error {
 		return fmt.Errorf("failed to find %q: %w", argv0, err)
 	}
 	return syscall.Exec(path, append([]string{argv0}, args...), os.Environ())
+}
+
+func detachStdinIfBackgroundTTY() error {
+	ttyPgrp, err := tcgetpgrp(int(os.Stdin.Fd()))
+	if err != nil {
+		// Stdin is not a TTY (or no controlling TTY), nothing to detach.
+		return nil
+	}
+	selfPgrp := syscall.Getpgrp()
+	if ttyPgrp == selfPgrp {
+		// Foreground job; keep stdin for interactive commands.
+		return nil
+	}
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		return fmt.Errorf("failed to open %s: %w", os.DevNull, err)
+	}
+	defer devNull.Close()
+	if err := syscall.Dup2(int(devNull.Fd()), int(os.Stdin.Fd())); err != nil {
+		return fmt.Errorf("failed to redirect stdin to %s: %w", os.DevNull, err)
+	}
+	return nil
+}
+
+func tcgetpgrp(fd int) (int, error) {
+	var pgrp int32
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), uintptr(syscall.TIOCGPGRP), uintptr(unsafe.Pointer(&pgrp)))
+	if errno != 0 {
+		return 0, errno
+	}
+	return int(pgrp), nil
 }
 
 const devcontainerInstallHint = `the devcontainer CLI is not installed.
