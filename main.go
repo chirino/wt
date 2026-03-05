@@ -1082,23 +1082,103 @@ func runInit(cmd *cobra.Command, args []string) error {
 }
 
 // resolveWorkspaceFolder resolves args to a workspace directory and remaining args.
-// Supports named worktrees and falls back to the main worktree when in it.
+// It works from any real git worktree path (including non-sibling layouts).
 func resolveWorkspaceFolder(args []string) (string, []string, error) {
-	name, extra, err := resolveOptionalWorktreeArgs(args)
-	if err == nil {
-		dir, err := resolveWorktreePath(name)
-		return dir, extra, err
+	currentRoot, currentErr := getCurrentWorktreeRoot()
+	if len(args) == 0 {
+		if currentErr != nil {
+			return "", nil, fmt.Errorf("not in a git worktree")
+		}
+		return currentRoot, nil, nil
 	}
-	// Fall back to main worktree
-	mainRoot, mainErr := getMainRepoRoot()
-	if mainErr != nil {
+
+	if args[0] == "." {
+		if currentErr != nil {
+			return "", nil, fmt.Errorf("not in a git worktree")
+		}
+		return currentRoot, args[1:], nil
+	}
+
+	if dir, ok, err := resolveWorktreePathArg(args[0]); err != nil {
 		return "", nil, err
+	} else if ok {
+		return dir, args[1:], nil
 	}
-	wtRoot, wtErr := getCurrentWorktreeRoot()
-	if wtErr != nil || wtRoot != mainRoot {
+
+	if dir, ok, err := resolveSiblingNameArg(args[0]); err != nil {
 		return "", nil, err
+	} else if ok {
+		return dir, args[1:], nil
 	}
-	return mainRoot, args, nil
+
+	if currentErr != nil {
+		return "", nil, fmt.Errorf("not in a git worktree")
+	}
+	return currentRoot, args, nil
+}
+
+func resolveWorktreePathArg(arg string) (string, bool, error) {
+	if !isPathLikeArg(arg) {
+		return "", false, nil
+	}
+	worktrees, err := listGitWorktreePaths()
+	if err != nil {
+		return "", false, nil
+	}
+	candidate := normalizePathForCompare(arg)
+	for _, wt := range worktrees {
+		if normalizePathForCompare(wt) == candidate {
+			return wt, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func resolveSiblingNameArg(arg string) (string, bool, error) {
+	if err := validateWorktreeName(arg); err != nil {
+		return "", false, nil
+	}
+	dir, err := resolveWorktreePath(arg)
+	if err != nil {
+		return "", false, err
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+		return dir, true, nil
+	}
+	return "", false, nil
+}
+
+func listGitWorktreePaths() ([]string, error) {
+	cmd := exec.Command("git", "worktree", "list", "--porcelain")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(line, "worktree ") {
+			paths = append(paths, strings.TrimPrefix(line, "worktree "))
+		}
+	}
+	return paths, nil
+}
+
+func isPathLikeArg(arg string) bool {
+	return filepath.IsAbs(arg) ||
+		strings.Contains(arg, string(filepath.Separator)) ||
+		strings.HasPrefix(arg, "."+string(filepath.Separator)) ||
+		strings.HasPrefix(arg, ".."+string(filepath.Separator))
+}
+
+func normalizePathForCompare(path string) string {
+	p := filepath.Clean(path)
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	return filepath.Clean(p)
 }
 
 // resolveOptionalWorktreeArgs splits args into (worktreeName, remainingArgs).
