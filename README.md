@@ -50,6 +50,7 @@ VS Code's built-in browser and the `wt chrome` / `wt playwright` commands are pr
 
 ## Installation
 
+### Step 1 - Install It
 ```bash
 go install github.com/chirino/wt@latest
 ```
@@ -60,6 +61,33 @@ Or build from source:
 git clone https://github.com/chirino/wt.git
 cd wt
 go build -o wt .
+```
+
+### Step 2 - Configure the Development Container
+
+Setup a devcontainer configuration for your project if you don't have one yet.
+
+```bash
+cd to-your-project
+wt init
+```
+
+This will create the basic .devcontainer directory and a minimal container that runs
+the socks5 proxy and support running git inside the container even on a worktree.
+
+Once this is done, you should ask your AI coding assistant to:
+
+```
+Update the .devcontainer/Dockerfile and add all development tools needed to work on this project.
+```
+
+### Step 3 - Integrate with your AI coding assistant
+Then integrate it with Codex or Claude Code. If `~/.codex` or `~/.claude` does not
+exist yet, run the assistant once first, or print the skill with `wt skill` and
+install it manually.
+
+```bash
+wt skill --install
 ```
 
 ## Usage
