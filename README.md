@@ -200,7 +200,7 @@ wt rm feature-xyz
 | `wt down [name]` | Stop and remove the worktree's devcontainer |
 | `wt bounce [name]` | Recreate the worktree's devcontainer (down + up) |
 | `wt build [name] [devcontainer-args...]` | Build the worktree's devcontainer image |
-| `wt exec [name] -- <cmd> [args...]` | Run a command inside the worktree's devcontainer |
+| `wt exec [name] [-- <cmd> [args...]]` | Open a shell or run a command inside the worktree's devcontainer |
 
 **SOCKS5 Proxy & Browser commands**
 
@@ -215,7 +215,7 @@ wt rm feature-xyz
 
 | Command | Description |
 |---|---|
-| `wt skill` | Print the ai agent SKILL.md file for the wt command |
+| `wt skill [--install] [--force]` | Print the AI agent SKILL.md file, or install it into detected Codex and Claude skill directories |
 | `wt completion <shell>` | Generate shell completion scripts |
 
 ## Shell completion

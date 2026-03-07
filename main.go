@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -37,6 +38,17 @@ var initSupervisordConf string
 const worktreeDelimiter = "@"
 
 var verbose bool
+
+type skillInstallTarget struct {
+	tool string
+	path string
+}
+
+type skillInstallResult struct {
+	tool   string
+	path   string
+	status string
+}
 
 func main() {
 	rootCmd := &cobra.Command{
@@ -241,11 +253,11 @@ PowerShell:
 
 	// Exec command
 	execCmd := &cobra.Command{
-		Use:     "exec [name] -- <command> [args...]",
-		Short:   "Run a command inside the worktree's devcontainer",
+		Use:     "exec [name] [-- <command> [args...]]",
+		Short:   "Open a shell or run a command inside the worktree's devcontainer",
 		GroupID: "devcontainer",
-		Long: `Runs a command inside the worktree's devcontainer using 'devcontainer exec'.
-Use '--' to separate the worktree name from the command.
+		Long: `Opens a shell or runs a command inside the worktree's devcontainer using 'devcontainer exec'.
+Use '--' to separate the optional worktree name from the command.
 
 Without a command, opens an interactive shell inside the container.
 If the worktree has no .devcontainer/devcontainer.json, the command is run
@@ -306,16 +318,48 @@ Examples:
 
 	// Skill command
 	skillCmd := &cobra.Command{
-		Use:     "skill",
+		Use:     "skill [--install] [--force]",
 		GroupID: "setup",
-		Short:   "Print the ai assitant skill for worktree-isolated execution",
-		Long: `Print a ai assitant skill file that teaches your ai agent how to use wt exec
-for commands that could conflict across worktrees.`,
+		Short:   "Print or install the AI assistant skill for worktree-isolated execution",
+		Long: `Print the AI assistant skill file that teaches your AI agent how to use wt exec
+for commands that could conflict across worktrees.
+
+With --install, writes the skill to any detected Codex and Claude skill directories.
+Use --force together with --install to overwrite an existing installed skill.`,
 		Args: cobra.NoArgs,
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Print(wtExecSkill)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			install, err := cmd.Flags().GetBool("install")
+			if err != nil {
+				return err
+			}
+			if !install {
+				fmt.Print(wtExecSkill)
+				return nil
+			}
+
+			force, err := cmd.Flags().GetBool("force")
+			if err != nil {
+				return err
+			}
+
+			results, err := installSkillFile("wt", wtExecSkill, force)
+			if len(results) > 0 {
+				for _, result := range results {
+					switch result.status {
+					case "installed":
+						fmt.Printf("%s: installed %s\n", result.tool, result.path)
+					case "overwritten":
+						fmt.Printf("%s: overwritten %s\n", result.tool, result.path)
+					case "exists":
+						fmt.Printf("%s: already exists at %s\n", result.tool, result.path)
+					}
+				}
+			}
+			return err
 		},
 	}
+	skillCmd.Flags().Bool("install", false, "install the skill into detected Codex and Claude directories")
+	skillCmd.Flags().Bool("force", false, "overwrite an existing installed skill when used with --install")
 
 	// Chrome command
 	chromeCmd := &cobra.Command{
@@ -1417,6 +1461,81 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return os.WriteFile(dst, data, 0644)
+}
+
+func installSkillFile(name, content string, force bool) ([]skillInstallResult, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine home directory: %w", err)
+	}
+
+	targets := []skillInstallTarget{
+		{tool: "Codex", path: filepath.Join(home, ".codex")},
+		{tool: "Claude", path: filepath.Join(home, ".claude")},
+	}
+
+	var results []skillInstallResult
+	var errs []error
+	detected := 0
+
+	for _, target := range targets {
+		info, err := os.Stat(target.path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			errs = append(errs, fmt.Errorf("%s: failed to inspect %s: %w", target.tool, target.path, err))
+			continue
+		}
+		if !info.IsDir() {
+			errs = append(errs, fmt.Errorf("%s: %s exists but is not a directory", target.tool, target.path))
+			continue
+		}
+
+		detected++
+		dst := filepath.Join(target.path, "skills", name, "SKILL.md")
+		_, err = os.Stat(dst)
+		exists := err == nil
+		if exists && !force {
+			results = append(results, skillInstallResult{
+				tool:   target.tool,
+				path:   dst,
+				status: "exists",
+			})
+			continue
+		}
+		if err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("%s: failed to inspect %s: %w", target.tool, dst, err))
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+			errs = append(errs, fmt.Errorf("%s: failed to create %s: %w", target.tool, filepath.Dir(dst), err))
+			continue
+		}
+		if err := os.WriteFile(dst, []byte(content), 0644); err != nil {
+			errs = append(errs, fmt.Errorf("%s: failed to write %s: %w", target.tool, dst, err))
+			continue
+		}
+
+		status := "installed"
+		if exists && force {
+			status = "overwritten"
+		}
+		results = append(results, skillInstallResult{
+			tool:   target.tool,
+			path:   dst,
+			status: status,
+		})
+	}
+
+	if detected == 0 {
+		return nil, fmt.Errorf("no Codex or Claude installation found under %s or %s", filepath.Join(home, ".codex"), filepath.Join(home, ".claude"))
+	}
+	if len(errs) > 0 {
+		return results, errors.Join(errs...)
+	}
+	return results, nil
 }
 
 func getParentShell() string {
