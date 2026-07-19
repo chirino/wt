@@ -124,6 +124,60 @@ func TestRunAddCopiesTrackedWorkingTreeChanges(t *testing.T) {
 	}
 }
 
+func TestRunSetupCopiesEnvironmentFilesFromMainCheckout(t *testing.T) {
+	root := setupTestRepository(t)
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("SHARED=value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".env.local"), []byte("LOCAL=value\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, ".env.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	externalPath := filepath.Join(filepath.Dir(root), "codex", "worktree", filepath.Base(root))
+	if err := os.MkdirAll(filepath.Dir(externalPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, root, "worktree", "add", "--detach", externalPath, "HEAD")
+	if err := os.WriteFile(filepath.Join(externalPath, ".env.local"), []byte("stale\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	chdir(t, externalPath)
+	if err := runSetup(&cobra.Command{}, nil); err != nil {
+		t.Fatalf("runSetup failed: %v", err)
+	}
+
+	assertFileContents(t, filepath.Join(externalPath, ".env"), "SHARED=value\n")
+	assertFileContents(t, filepath.Join(externalPath, ".env.local"), "LOCAL=value\n")
+	if info, err := os.Stat(filepath.Join(externalPath, ".env")); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf(".env mode = %v, %v; want 0600", info, err)
+	}
+	if _, err := os.Stat(filepath.Join(externalPath, ".env.d")); !os.IsNotExist(err) {
+		t.Fatalf(".env.d should not be copied: %v", err)
+	}
+}
+
+func TestRunSetupCanTargetCodexWorktreeByPath(t *testing.T) {
+	root := setupTestRepository(t)
+	if err := os.WriteFile(filepath.Join(root, ".env.test"), []byte("TEST=value\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	externalPath := filepath.Join(filepath.Dir(root), "codex", "other", filepath.Base(root))
+	if err := os.MkdirAll(filepath.Dir(externalPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, root, "worktree", "add", "--detach", externalPath, "HEAD")
+
+	if err := runSetup(&cobra.Command{}, []string{externalPath}); err != nil {
+		t.Fatalf("runSetup failed: %v", err)
+	}
+	assertFileContents(t, filepath.Join(externalPath, ".env.test"), "TEST=value\n")
+}
+
 func TestBranchSelectorsSupportNonSiblingWorktrees(t *testing.T) {
 	root := setupTestRepository(t)
 	externalParent := filepath.Join(filepath.Dir(root), "codex", "c258")

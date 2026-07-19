@@ -184,6 +184,23 @@ branch named after the worktree unless --detach is specified.`,
 	codeCmd.Flags().BoolP("create", "c", false, "Create worktree if it doesn't exist")
 	codeCmd.Flags().Bool("detach", false, "Create a missing worktree at a detached HEAD")
 
+	// Setup command
+	setupCmd := &cobra.Command{
+		Use:     "setup [selector]",
+		Short:   "Set up an existing worktree with local environment files",
+		GroupID: "setup",
+		Long: `Copies all root-level .env* files from the main repository checkout into
+the selected worktree. Without a selector, sets up the current worktree.
+
+This is intended for worktrees created by external tools such as Codex. It is
+safe to use as a Codex local environment setup script:
+
+  wt setup`,
+		Args:              cobra.MaximumNArgs(1),
+		RunE:              runSetup,
+		ValidArgsFunction: worktreeArgsCompletion,
+	}
+
 	// Completion command
 	completionCmd := &cobra.Command{
 		Use:     "completion [bash|zsh|fish|powershell]",
@@ -490,7 +507,7 @@ Useful after changes to .devcontainer/ configuration.`,
 		},
 	}
 
-	rootCmd.AddCommand(addCmd, lsCmd, rmCmd, cdCmd, codeCmd, chromeCmd, playwrightCmd, curlCmd, nameCmd, dirCmd, execCmd, upCmd, downCmd, buildCmd, bounceCmd, proxyPortCmd, skillCmd, completionCmd, initCmd)
+	rootCmd.AddCommand(addCmd, lsCmd, rmCmd, cdCmd, codeCmd, chromeCmd, playwrightCmd, curlCmd, nameCmd, dirCmd, execCmd, upCmd, downCmd, buildCmd, bounceCmd, proxyPortCmd, setupCmd, skillCmd, completionCmd, initCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -821,17 +838,45 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("worktree created at %s, but failed to copy tracked changes: %w", worktreePath, err)
 	}
 
-	// Copy all .env* files from root of project
-	envFiles, _ := filepath.Glob(filepath.Join(projectDir, ".env*"))
-	for _, src := range envFiles {
-		base := filepath.Base(src)
-		dst := filepath.Join(worktreePath, base)
-		if err := copyFile(src, dst); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to copy %s: %v\n", base, err)
-		}
+	// Copy all root-level .env* files from the source worktree.
+	if _, err := copyEnvironmentFiles(projectDir, worktreePath); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to copy environment files: %v\n", err)
 	}
 
 	fmt.Println(worktreePath)
+	return nil
+}
+
+func runSetup(cmd *cobra.Command, args []string) error {
+	destinationRoot, err := getCurrentWorktreeRoot()
+	if err != nil {
+		return fmt.Errorf("not in a git worktree")
+	}
+	if len(args) == 1 {
+		var ok bool
+		destinationRoot, ok, err = resolveWorktreeSelector(args[0])
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("worktree %q does not exist", args[0])
+		}
+	}
+
+	sourceRoot, err := getMainRepoRoot()
+	if err != nil {
+		return err
+	}
+	if normalizePathForCompare(sourceRoot) == normalizePathForCompare(destinationRoot) {
+		fmt.Println("Current worktree is the main checkout; nothing to set up")
+		return nil
+	}
+
+	copied, err := copyEnvironmentFiles(sourceRoot, destinationRoot)
+	if err != nil {
+		return fmt.Errorf("failed to set up worktree: %w", err)
+	}
+	fmt.Printf("Copied %d environment file(s) to %s\n", copied, destinationRoot)
 	return nil
 }
 
@@ -1616,6 +1661,35 @@ func confirmCreate(name string) bool {
 	reply, _ := reader.ReadString('\n')
 	reply = strings.TrimSpace(strings.ToLower(reply))
 	return reply == "y" || reply == "yes"
+}
+
+func copyEnvironmentFiles(sourceRoot, destinationRoot string) (int, error) {
+	envFiles, err := filepath.Glob(filepath.Join(sourceRoot, ".env*"))
+	if err != nil {
+		return 0, err
+	}
+
+	copied := 0
+	var errs []error
+	for _, sourcePath := range envFiles {
+		info, err := os.Lstat(sourcePath)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("inspect %s: %w", filepath.Base(sourcePath), err))
+			continue
+		}
+		if info.IsDir() {
+			continue
+		}
+
+		base := filepath.Base(sourcePath)
+		destinationPath := filepath.Join(destinationRoot, base)
+		if err := copyFile(sourcePath, destinationPath); err != nil {
+			errs = append(errs, fmt.Errorf("copy %s: %w", base, err))
+			continue
+		}
+		copied++
+	}
+	return copied, errors.Join(errs...)
 }
 
 func copyTrackedChanges(sourceRoot, destinationRoot string) error {

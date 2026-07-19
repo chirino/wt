@@ -103,6 +103,7 @@ All commands default to the current worktree when no name is given.
 | `wt down [name]` | Stop and remove the worktree's devcontainer |
 | `wt bounce [name]` | Recreate the worktree's devcontainer (down + up) |
 | `wt init` | Create a minimal `.devcontainer/` with SOCKS5 proxy support |
+| `wt setup [selector]` | Copy the main checkout's root-level `.env*` files into an existing worktree |
 | `wt proxy-port [name]` | Print the SOCKS proxy port for the worktree |
 | `wt name` | Print the current worktree name |
 | `wt dir` | Print the current worktree root directory |

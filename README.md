@@ -45,6 +45,7 @@ VS Code's built-in browser and the `wt chrome` / `wt playwright` commands are pr
 - **Flexible selection** - Address registered worktrees by branch name, legacy sibling alias, or absolute path, including worktrees created by other tools
 - **Tracked change inheritance** - New worktrees copy the current contents and deletions of files changed relative to `HEAD`
 - **Environment file copying** - Automatically copies all `.env*` files from the project root to new worktrees
+- **External worktree setup** - Copies local `.env*` files into worktrees created by Codex or other tools
 - **Devcontainer support** - Start, build, and exec into per-worktree devcontainers
 - **VS Code integration** - Open worktrees in VS Code with devcontainer attach and per-worktree profile isolation
 - **SOCKS proxy per worktree** - Each devcontainer gets a dedicated proxy port for accessing container services from the host
@@ -114,6 +115,23 @@ wt add --detach experiment
 ```
 
 Branch names containing `/` remain the worktree selector and are escaped only in the physical directory name. For example, `wt add feature/accounts` creates `myproject@feature%2Faccounts`, which you continue to address as `feature/accounts`.
+
+### Set up a Codex-created worktree
+
+Use `wt setup` as a Codex local environment setup script. Codex runs it from
+each newly created worktree, and `wt` copies root-level `.env*` files from the
+main checkout into that worktree. Existing destination files are overwritten:
+
+```bash
+wt setup
+```
+
+You can also set up any registered worktree from another checkout by passing
+its branch name, sibling alias, or absolute path:
+
+```bash
+wt setup add-ai-chart-of-accounts
+```
 
 ### List worktrees
 
@@ -267,6 +285,7 @@ wt rm feature-xyz
 
 | Command | Description |
 |---|---|
+| `wt setup [selector]` | Copy root-level `.env*` files from the main checkout into an existing worktree |
 | `wt skill [--install] [--force]` | Print the AI agent SKILL.md file, or install it into detected Codex and Claude skill directories |
 | `wt completion <shell>` | Generate shell completion scripts |
 
