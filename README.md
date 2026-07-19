@@ -43,6 +43,7 @@ VS Code's built-in browser and the `wt chrome` / `wt playwright` commands are pr
 - **Sibling directory layout** - Worktrees are created as siblings of the main repo (e.g., `myproject@feature` next to `myproject/`)
 - **Branch-backed by default** - New worktrees get a branch with the requested name; use `--detach` for disposable worktrees
 - **Flexible selection** - Address registered worktrees by branch name, legacy sibling alias, or absolute path, including worktrees created by other tools
+- **Tracked change inheritance** - New worktrees copy the current contents and deletions of files changed relative to `HEAD`
 - **Environment file copying** - Automatically copies all `.env*` files from the project root to new worktrees
 - **Devcontainer support** - Start, build, and exec into per-worktree devcontainers
 - **VS Code integration** - Open worktrees in VS Code with devcontainer attach and per-worktree profile isolation
@@ -101,7 +102,10 @@ wt add feature-xyz
 ```
 
 Creates a worktree at `../myproject@feature-xyz` (sibling to your main repo) on a new `feature-xyz` branch at the current HEAD. If the local branch already exists and is not checked out, `wt` reuses it. Automatically:
+- Copies tracked working-tree changes without staging them in the new worktree
 - Copies all `.env*` files from the root of the current project
+
+Both staged and unstaged file contents are inherited. Modified and deleted files appear as unstaged changes in the new worktree, while staged additions appear as untracked files because the destination index starts from `HEAD`. Other untracked files are not copied, except for `.env*` files.
 
 Use a detached HEAD for a disposable worktree:
 

@@ -89,6 +89,7 @@ exists and is not checked out elsewhere, it is reused.
 
 Automatically:
   - Fetches from origin (if configured)
+  - Copies tracked working-tree changes without staging them
   - Copies all .env* files from the root of the current worktree
 
 Use --detach to create the worktree at a detached HEAD instead.`,
@@ -812,6 +813,13 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("git worktree add failed: %w", err)
 	}
 
+	// Carry the current contents of tracked changes into the new worktree. The
+	// destination index is intentionally left untouched, so inherited changes
+	// appear as unstaged modifications (or untracked files for staged additions).
+	if err := copyTrackedChanges(projectDir, worktreePath); err != nil {
+		return fmt.Errorf("worktree created at %s, but failed to copy tracked changes: %w", worktreePath, err)
+	}
+
 	// Copy all .env* files from root of project
 	envFiles, _ := filepath.Glob(filepath.Join(projectDir, ".env*"))
 	for _, src := range envFiles {
@@ -1508,12 +1516,133 @@ func confirmCreate(name string) bool {
 	return reply == "y" || reply == "yes"
 }
 
+func copyTrackedChanges(sourceRoot, destinationRoot string) error {
+	diffCmd := exec.Command("git", "diff", "--name-only", "--no-renames", "--ignore-submodules=all", "-z", "HEAD", "--")
+	diffCmd.Dir = sourceRoot
+	output, err := diffCmd.Output()
+	if err != nil {
+		return fmt.Errorf("list tracked changes: %w", err)
+	}
+
+	var errs []error
+	for _, rawPath := range bytes.Split(output, []byte{0}) {
+		if len(rawPath) == 0 {
+			continue
+		}
+		relativePath := filepath.FromSlash(string(rawPath))
+		sourcePath, err := projectPath(sourceRoot, relativePath)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		destinationPath, err := projectPath(destinationRoot, relativePath)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := ensureDestinationParent(destinationRoot, destinationPath); err != nil {
+			errs = append(errs, fmt.Errorf("prepare %s: %w", relativePath, err))
+			continue
+		}
+
+		info, err := os.Lstat(sourcePath)
+		switch {
+		case os.IsNotExist(err):
+			if err := os.RemoveAll(destinationPath); err != nil {
+				errs = append(errs, fmt.Errorf("copy deletion %s: %w", relativePath, err))
+			}
+		case err != nil:
+			errs = append(errs, fmt.Errorf("inspect %s: %w", relativePath, err))
+		case info.IsDir():
+			// Git directories are submodules, which are excluded from the diff.
+			continue
+		default:
+			if err := copyFile(sourcePath, destinationPath); err != nil {
+				errs = append(errs, fmt.Errorf("copy %s: %w", relativePath, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func projectPath(root, relativePath string) (string, error) {
+	relativePath = filepath.Clean(relativePath)
+	if relativePath == "." || filepath.IsAbs(relativePath) || relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("invalid project-relative path %q", relativePath)
+	}
+	path := filepath.Join(root, relativePath)
+	containedPath, err := filepath.Rel(root, path)
+	if err != nil || containedPath == ".." || strings.HasPrefix(containedPath, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q escapes project root", relativePath)
+	}
+	return path, nil
+}
+
+func ensureDestinationParent(root, destinationPath string) error {
+	parent := filepath.Dir(destinationPath)
+	relativeParent, err := filepath.Rel(root, parent)
+	if err != nil {
+		return err
+	}
+	current := root
+	for _, component := range strings.Split(relativeParent, string(filepath.Separator)) {
+		if component == "" || component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		switch {
+		case os.IsNotExist(err):
+			if err := os.Mkdir(current, 0755); err != nil {
+				return err
+			}
+		case err != nil:
+			return err
+		case !info.IsDir():
+			if err := os.RemoveAll(current); err != nil {
+				return err
+			}
+			if err := os.Mkdir(current, 0755); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func copyFile(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(src)
+		if err != nil {
+			return err
+		}
+		if err := os.RemoveAll(dst); err != nil {
+			return err
+		}
+		return os.Symlink(target, dst)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("unsupported file type %s", info.Mode().Type())
+	}
+	if destinationInfo, err := os.Lstat(dst); err == nil && !destinationInfo.Mode().IsRegular() {
+		if err := os.RemoveAll(dst); err != nil {
+			return err
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0644)
+	if err := os.WriteFile(dst, data, info.Mode().Perm()); err != nil {
+		return err
+	}
+	return os.Chmod(dst, info.Mode().Perm())
 }
 
 func installSkillFile(name, content string, force bool) ([]skillInstallResult, error) {

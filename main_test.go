@@ -77,6 +77,53 @@ func TestRunAddReusesExistingLocalBranch(t *testing.T) {
 	}
 }
 
+func TestRunAddCopiesTrackedWorkingTreeChanges(t *testing.T) {
+	root := setupTestRepository(t)
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("modified\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "delete-me.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "script.sh"), []byte("#!/bin/sh\necho changed\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, root, "add", "script.sh")
+	if err := os.Mkdir(filepath.Join(root, "newdir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "newdir", "added.txt"), []byte("staged addition\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, root, "add", "newdir/added.txt")
+	if err := os.WriteFile(filepath.Join(root, "untracked.txt"), []byte("do not copy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runAdd(testAddCommand(t, false), []string{"inherit-changes"}); err != nil {
+		t.Fatalf("runAdd failed: %v", err)
+	}
+
+	worktreePath := filepath.Join(filepath.Dir(root), filepath.Base(root)+"@inherit-changes")
+	assertFileContents(t, filepath.Join(worktreePath, "README.md"), "modified\n")
+	assertFileContents(t, filepath.Join(worktreePath, "script.sh"), "#!/bin/sh\necho changed\n")
+	assertFileContents(t, filepath.Join(worktreePath, "newdir", "added.txt"), "staged addition\n")
+	if info, err := os.Stat(filepath.Join(worktreePath, "script.sh")); err != nil || info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("script executable mode was not copied: %v, %v", info, err)
+	}
+	for _, absent := range []string{"delete-me.txt", "untracked.txt"} {
+		if _, err := os.Stat(filepath.Join(worktreePath, absent)); !os.IsNotExist(err) {
+			t.Fatalf("%s exists in new worktree or returned unexpected error: %v", absent, err)
+		}
+	}
+	status := gitOutput(t, worktreePath, "status", "--short")
+	for _, expected := range []string{"M README.md", "D delete-me.txt", "M script.sh", "?? newdir/"} {
+		if !strings.Contains(status, expected) {
+			t.Errorf("new worktree status %q does not contain %q", status, expected)
+		}
+	}
+}
+
 func TestBranchSelectorsSupportNonSiblingWorktrees(t *testing.T) {
 	root := setupTestRepository(t)
 	externalParent := filepath.Join(filepath.Dir(root), "codex", "c258")
@@ -134,7 +181,13 @@ func setupTestRepository(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("test\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitRun(t, root, "add", "README.md")
+	if err := os.WriteFile(filepath.Join(root, "delete-me.txt"), []byte("delete me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "script.sh"), []byte("#!/bin/sh\necho original\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, root, "add", "README.md", "delete-me.txt", "script.sh")
 	gitRun(t, root, "-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "initial")
 	chdir(t, root)
 	return root
@@ -197,4 +250,15 @@ func contains(values []string, target string) bool {
 
 func samePath(left, right string) bool {
 	return normalizePathForCompare(left) == normalizePathForCompare(right)
+}
+
+func assertFileContents(t *testing.T, path, expected string) {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != expected {
+		t.Fatalf("%s contents = %q, want %q", path, contents, expected)
+	}
 }
