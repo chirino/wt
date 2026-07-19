@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -50,6 +51,11 @@ type skillInstallResult struct {
 	status string
 }
 
+type gitWorktree struct {
+	path   string
+	branch string
+}
+
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "wt",
@@ -78,20 +84,24 @@ from the host.`,
 		Short:   "Create a new worktree",
 		GroupID: "worktree",
 		Long: `Creates a new git worktree at ../repo@<name> (a sibling of the main repo),
-detached at the current HEAD.
+on a new branch named <name> at the current HEAD. If that local branch already
+exists and is not checked out elsewhere, it is reused.
 
 Automatically:
   - Fetches from origin (if configured)
-  - Copies all .env* files from the root of the current worktree`,
+  - Copies all .env* files from the root of the current worktree
+
+Use --detach to create the worktree at a detached HEAD instead.`,
 		Args: cobra.ExactArgs(1),
 		RunE: runAdd,
 	}
+	addCmd.Flags().Bool("detach", false, "Create the worktree at a detached HEAD")
 
 	// List command
 	lsCmd := &cobra.Command{
 		Use:     "ls",
 		Aliases: []string{"list"},
-		Short:   "List all sibling worktrees",
+		Short:   "List registered secondary worktrees",
 		Args:    cobra.NoArgs,
 		RunE:    runList,
 		GroupID: "worktree",
@@ -99,12 +109,14 @@ Automatically:
 
 	// Remove command
 	rmCmd := &cobra.Command{
-		Use:     "rm <name> [git-args...]",
+		Use:     "rm <selector> [git-args...]",
 		Aliases: []string{"remove"},
 		Short:   "Remove a worktree and clean up its directory",
 		GroupID: "worktree",
-		Long: `Removes the named worktree using 'git worktree remove', then deletes any
+		Long: `Removes the selected worktree using 'git worktree remove', then deletes any
 remaining files in the worktree directory (e.g. .vscode-profile/, untracked files).
+
+The selector may be an associated branch name, legacy sibling alias, or path.
 
 Extra arguments are passed through to 'git worktree remove' (e.g. --force).`,
 		Args: cobra.MinimumNArgs(1),
@@ -127,22 +139,26 @@ Extra arguments are passed through to 'git worktree remove' (e.g. --force).`,
 
 	// CD command
 	cdCmd := &cobra.Command{
-		Use:     "cd [name]",
+		Use:     "cd [selector]",
 		Short:   "Open a shell in the worktree directory",
 		GroupID: "worktree",
-		Long: `Opens a new interactive shell in the named worktree directory.
+		Long: `Opens a new interactive shell in the selected worktree directory.
 Without a name, opens a shell in the main repo root.
 
-Use -c to auto-create the worktree if it doesn't exist.`,
+The selector may be an associated branch name, legacy sibling alias, or path.
+
+Use -c to auto-create the worktree if it doesn't exist. New worktrees use a
+branch named after the worktree unless --detach is specified.`,
 		Args:              cobra.MaximumNArgs(1),
 		RunE:              runCD,
 		ValidArgsFunction: worktreeArgsCompletion,
 	}
 	cdCmd.Flags().BoolP("create", "c", false, "Create worktree if it doesn't exist")
+	cdCmd.Flags().Bool("detach", false, "Create a missing worktree at a detached HEAD")
 
 	// Code command
 	codeCmd := &cobra.Command{
-		Use:     "code [name]",
+		Use:     "code [selector]",
 		Short:   "Open the worktree in VS Code",
 		GroupID: "worktree",
 		Long: `Opens the worktree directory in VS Code.
@@ -154,13 +170,17 @@ is available, this will:
   3. Use a per-worktree VS Code profile (.vscode-profile/) to isolate settings
   4. Route VS Code network traffic through the worktree's SOCKS5 proxy
 
-Without a devcontainer, opens the directory in VS Code directly.
-Use -c to auto-create the worktree if it doesn't exist.`,
+Without a devcontainer, opens the directory in VS Code directly. The selector
+may be an associated branch name, legacy sibling alias, or path.
+
+Use -c to auto-create the worktree if it doesn't exist. New worktrees use a
+branch named after the worktree unless --detach is specified.`,
 		Args:              cobra.MaximumNArgs(1),
 		RunE:              runCode,
 		ValidArgsFunction: worktreeArgsCompletion,
 	}
 	codeCmd.Flags().BoolP("create", "c", false, "Create worktree if it doesn't exist")
+	codeCmd.Flags().Bool("detach", false, "Create a missing worktree at a detached HEAD")
 
 	// Completion command
 	completionCmd := &cobra.Command{
@@ -528,8 +548,63 @@ func parseWorktreeName(dirName, repoBasename string) string {
 	return ""
 }
 
-// resolveCurrentWorktreeName returns the name of the current worktree based on cwd.
-// Returns an error if the user is not inside a named worktree.
+// listGitWorktrees returns every worktree registered with the current repository.
+func listGitWorktrees() ([]gitWorktree, error) {
+	cmd := exec.Command("git", "worktree", "list", "--porcelain")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	var worktrees []gitWorktree
+	for _, line := range strings.Split(string(output), "\n") {
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			worktrees = append(worktrees, gitWorktree{
+				path: strings.TrimPrefix(line, "worktree "),
+			})
+		case strings.HasPrefix(line, "branch ") && len(worktrees) > 0:
+			branch := strings.TrimPrefix(line, "branch ")
+			worktrees[len(worktrees)-1].branch = strings.TrimPrefix(branch, "refs/heads/")
+		}
+	}
+	return worktrees, nil
+}
+
+func worktreeAlias(path, mainRoot string) string {
+	path = normalizePathForCompare(path)
+	mainRoot = normalizePathForCompare(mainRoot)
+	if path == mainRoot || filepath.Dir(path) != filepath.Dir(mainRoot) {
+		return ""
+	}
+	return parseWorktreeName(filepath.Base(path), filepath.Base(mainRoot))
+}
+
+// worktreeSelector returns the most useful selector for a worktree. Attached
+// branches are canonical; the legacy repo@name alias remains the fallback for
+// detached sibling worktrees. Arbitrarily located detached worktrees use a path.
+func worktreeSelector(worktree gitWorktree, mainRoot string) string {
+	if worktree.branch != "" {
+		return worktree.branch
+	}
+	if alias := worktreeAlias(worktree.path, mainRoot); alias != "" {
+		return alias
+	}
+	return worktree.path
+}
+
+func findWorktreeByPath(path string, worktrees []gitWorktree) (gitWorktree, bool) {
+	candidate := normalizePathForCompare(path)
+	for _, worktree := range worktrees {
+		if normalizePathForCompare(worktree.path) == candidate {
+			return worktree, true
+		}
+	}
+	return gitWorktree{}, false
+}
+
+// resolveCurrentWorktreeName returns the current worktree's branch name, legacy
+// sibling alias, or absolute path (in that order).
 func resolveCurrentWorktreeName() (string, error) {
 	wtRoot, err := getCurrentWorktreeRoot()
 	if err != nil {
@@ -539,26 +614,15 @@ func resolveCurrentWorktreeName() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if wtRoot == mainRoot {
-		return "", fmt.Errorf("currently in the main worktree, not a named worktree")
+	worktrees, err := listGitWorktrees()
+	if err != nil {
+		return "", fmt.Errorf("failed to list git worktrees: %w", err)
 	}
-	repoBasename := filepath.Base(mainRoot)
-	name := parseWorktreeName(filepath.Base(wtRoot), repoBasename)
-	if name == "" {
-		return "", fmt.Errorf("current directory is not in a recognized worktree")
+	worktree, ok := findWorktreeByPath(wtRoot, worktrees)
+	if !ok {
+		return "", fmt.Errorf("current directory is not a registered git worktree")
 	}
-	return name, nil
-}
-
-// resolveNameArg resolves a name argument, treating "." as the current worktree.
-func resolveNameArg(name string) (string, error) {
-	if name == "." {
-		return resolveCurrentWorktreeName()
-	}
-	if err := validateWorktreeName(name); err != nil {
-		return "", err
-	}
-	return name, nil
+	return worktreeSelector(worktree, mainRoot), nil
 }
 
 // resolveWorktreePath returns the full path for a worktree by name.
@@ -566,6 +630,10 @@ func resolveWorktreePath(name string) (string, error) {
 	if err := validateWorktreeName(name); err != nil {
 		return "", err
 	}
+	return resolveWorktreePathAlias(name)
+}
+
+func resolveWorktreePathAlias(alias string) (string, error) {
 	parentDir, err := getWorktreeParentDir()
 	if err != nil {
 		return "", err
@@ -574,8 +642,63 @@ func resolveWorktreePath(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dirName := worktreeDirName(filepath.Base(mainRoot), name)
+	dirName := worktreeDirName(filepath.Base(mainRoot), alias)
 	return filepath.Join(parentDir, dirName), nil
+}
+
+func resolveNewWorktreePath(name string, detach bool) (string, error) {
+	if detach {
+		if err := validateWorktreeName(name); err != nil {
+			return "", err
+		}
+		return resolveWorktreePathAlias(name)
+	}
+	if err := validateBranchName(name); err != nil {
+		return "", err
+	}
+	return resolveWorktreePathAlias(url.PathEscape(name))
+}
+
+// resolveWorktreeSelector resolves a registered worktree by path, associated
+// branch name, or the legacy repo@name directory alias.
+func resolveWorktreeSelector(selector string) (string, bool, error) {
+	if selector == "." {
+		root, err := getCurrentWorktreeRoot()
+		if err != nil {
+			return "", false, fmt.Errorf("not in a git worktree")
+		}
+		return root, true, nil
+	}
+
+	worktrees, err := listGitWorktrees()
+	if err != nil {
+		return "", false, fmt.Errorf("failed to list git worktrees: %w", err)
+	}
+	if isPathLikeArg(selector) {
+		if worktree, ok := findWorktreeByPath(selector, worktrees); ok {
+			return worktree.path, true, nil
+		}
+	}
+
+	mainRoot, err := getMainRepoRoot()
+	if err != nil {
+		return "", false, err
+	}
+	var matches []string
+	for _, worktree := range worktrees {
+		branchMatch := worktree.branch != "" && (worktree.branch == selector || "refs/heads/"+worktree.branch == selector)
+		aliasMatch := worktreeAlias(worktree.path, mainRoot) == selector
+		if branchMatch || aliasMatch {
+			matches = append(matches, worktree.path)
+		}
+	}
+	if len(matches) == 0 {
+		return "", false, nil
+	}
+	if len(matches) > 1 {
+		return "", false, fmt.Errorf("worktree selector %q is ambiguous: %s", selector, strings.Join(matches, ", "))
+	}
+	return matches[0], true, nil
 }
 
 func getWorktreeNames(prefix string) []string {
@@ -583,42 +706,54 @@ func getWorktreeNames(prefix string) []string {
 	if err != nil {
 		return nil
 	}
-	parentDir := filepath.Dir(mainRoot)
-	repoBasename := filepath.Base(mainRoot)
-
-	cmd := exec.Command("git", "worktree", "list", "--porcelain")
-	output, err := cmd.Output()
+	worktrees, err := listGitWorktrees()
 	if err != nil {
 		return nil
 	}
 
-	var names []string
-	for _, line := range strings.Split(string(output), "\n") {
-		if !strings.HasPrefix(line, "worktree ") {
-			continue
-		}
-		wtPath := strings.TrimPrefix(line, "worktree ")
-		if wtPath == mainRoot {
-			continue
-		}
-		if filepath.Dir(wtPath) != parentDir {
-			continue
-		}
-		name := parseWorktreeName(filepath.Base(wtPath), repoBasename)
-		if name != "" && strings.HasPrefix(name, prefix) {
-			names = append(names, name)
+	names := make(map[string]struct{})
+	for _, worktree := range worktrees {
+		selectors := []string{worktree.branch, worktreeAlias(worktree.path, mainRoot)}
+		for _, selector := range selectors {
+			if selector != "" && strings.HasPrefix(selector, prefix) {
+				names[selector] = struct{}{}
+			}
 		}
 	}
-	return names
+	result := make([]string, 0, len(names))
+	for name := range names {
+		result = append(result, name)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
 	name := args[0]
-	if err := validateWorktreeName(name); err != nil {
-		return err
+	detach := false
+	if flag := cmd.Flags().Lookup("detach"); flag != nil {
+		detach, _ = cmd.Flags().GetBool("detach")
+	}
+	if detach {
+		if err := validateWorktreeName(name); err != nil {
+			return err
+		}
+	} else {
+		if err := validateBranchName(name); err != nil {
+			return err
+		}
+		worktrees, err := listGitWorktrees()
+		if err != nil {
+			return fmt.Errorf("failed to list git worktrees: %w", err)
+		}
+		for _, worktree := range worktrees {
+			if worktree.branch == name {
+				return fmt.Errorf("branch %q is already checked out at %s", name, worktree.path)
+			}
+		}
 	}
 
-	worktreePath, err := resolveWorktreePath(name)
+	worktreePath, err := resolveNewWorktreePath(name, detach)
 	if err != nil {
 		return err
 	}
@@ -656,8 +791,21 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr, "Warning: git remote 'origin' not configured; skipping fetch")
 	}
 
-	// Create worktree off current HEAD
-	gitCmd := exec.Command("git", "worktree", "add", "--detach", worktreePath, "HEAD")
+	// Create the worktree from current HEAD. Reuse an existing local branch when
+	// possible; otherwise create the branch. Detached mode preserves the legacy
+	// behavior for disposable worktrees.
+	gitArgs := []string{"worktree", "add"}
+	if detach {
+		gitArgs = append(gitArgs, "--detach", worktreePath, "HEAD")
+	} else {
+		branchExists := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+name).Run() == nil
+		if branchExists {
+			gitArgs = append(gitArgs, worktreePath, name)
+		} else {
+			gitArgs = append(gitArgs, "-b", name, worktreePath, "HEAD")
+		}
+	}
+	gitCmd := exec.Command("git", gitArgs...)
 	gitCmd.Stdout = os.Stdout
 	gitCmd.Stderr = os.Stderr
 	if err := gitCmd.Run(); err != nil {
@@ -683,42 +831,27 @@ func runList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	parentDir := filepath.Dir(mainRoot)
-	repoBasename := filepath.Base(mainRoot)
-
-	gitCmd := exec.Command("git", "worktree", "list", "--porcelain")
-	output, err := gitCmd.Output()
+	worktrees, err := listGitWorktrees()
 	if err != nil {
 		return fmt.Errorf("git worktree list failed: %w", err)
 	}
 
-	for _, line := range strings.Split(string(output), "\n") {
-		if !strings.HasPrefix(line, "worktree ") {
+	for _, worktree := range worktrees {
+		if normalizePathForCompare(worktree.path) == normalizePathForCompare(mainRoot) {
 			continue
 		}
-		wtPath := strings.TrimPrefix(line, "worktree ")
-		if wtPath == mainRoot {
-			continue
-		}
-		if filepath.Dir(wtPath) != parentDir {
-			continue
-		}
-		name := parseWorktreeName(filepath.Base(wtPath), repoBasename)
-		if name != "" {
-			fmt.Println(name)
-		}
+		fmt.Println(worktreeSelector(worktree, mainRoot))
 	}
 	return nil
 }
 
 func runRemove(cmd *cobra.Command, args []string) error {
-	name, err := resolveNameArg(args[0])
+	worktreePath, ok, err := resolveWorktreeSelector(args[0])
 	if err != nil {
 		return err
 	}
-	worktreePath, err := resolveWorktreePath(name)
-	if err != nil {
-		return err
+	if !ok {
+		return fmt.Errorf("worktree %q does not exist", args[0])
 	}
 
 	gitArgs := append([]string{"worktree", "remove", worktreePath}, args[1:]...)
@@ -740,17 +873,20 @@ func runRemove(cmd *cobra.Command, args []string) error {
 
 func resolveWorktreeDir(cmd *cobra.Command, args []string) (string, error) {
 	create, _ := cmd.Flags().GetBool("create")
+	detach, _ := cmd.Flags().GetBool("detach")
 
 	if len(args) == 0 {
 		// No name provided, go to main repo root
 		return getMainRepoRoot()
 	}
 
-	name, err := resolveNameArg(args[0])
-	if err != nil {
+	selector := args[0]
+	if dir, ok, err := resolveWorktreeSelector(selector); err != nil {
 		return "", err
+	} else if ok {
+		return dir, nil
 	}
-	dir, err := resolveWorktreePath(name)
+	dir, err := resolveNewWorktreePath(selector, detach)
 	if err != nil {
 		return "", err
 	}
@@ -761,7 +897,7 @@ func resolveWorktreeDir(cmd *cobra.Command, args []string) (string, error) {
 				return "", err
 			}
 		} else {
-			if !confirmCreate(name) {
+			if !confirmCreate(selector) {
 				return "", fmt.Errorf("aborted")
 			}
 			if err := runAdd(cmd, args); err != nil {
@@ -999,35 +1135,6 @@ func runExec(cmd *cobra.Command, args []string) error {
 	return sysExec(cmdArgs[0], cmdArgs[1:])
 }
 
-// resolveExecArgs splits args into (worktreeName, commandArgs).
-// If the first arg is "." or matches a known worktree name, it's used as the
-// worktree name and the rest are the command. Otherwise, the current worktree
-// is used and all args are treated as the command.
-func resolveExecArgs(args []string) (string, []string, error) {
-	if args[0] == "." {
-		name, err := resolveCurrentWorktreeName()
-		if err != nil {
-			return "", nil, err
-		}
-		return name, args[1:], nil
-	}
-
-	// Check if the first arg is a known worktree name
-	names := getWorktreeNames("")
-	for _, n := range names {
-		if args[0] == n {
-			return n, args[1:], nil
-		}
-	}
-
-	// First arg is not a worktree — default to current worktree
-	name, err := resolveCurrentWorktreeName()
-	if err != nil {
-		return "", nil, err
-	}
-	return name, args, nil
-}
-
 func runUp(cmd *cobra.Command, args []string) error {
 	if err := requireDevcontainerCLI(); err != nil {
 		return err
@@ -1143,13 +1250,7 @@ func resolveWorkspaceFolder(args []string) (string, []string, error) {
 		return currentRoot, args[1:], nil
 	}
 
-	if dir, ok, err := resolveWorktreePathArg(args[0]); err != nil {
-		return "", nil, err
-	} else if ok {
-		return dir, args[1:], nil
-	}
-
-	if dir, ok, err := resolveSiblingNameArg(args[0]); err != nil {
+	if dir, ok, err := resolveWorktreeSelector(args[0]); err != nil {
 		return "", nil, err
 	} else if ok {
 		return dir, args[1:], nil
@@ -1159,52 +1260,6 @@ func resolveWorkspaceFolder(args []string) (string, []string, error) {
 		return "", nil, fmt.Errorf("not in a git worktree")
 	}
 	return currentRoot, args, nil
-}
-
-func resolveWorktreePathArg(arg string) (string, bool, error) {
-	if !isPathLikeArg(arg) {
-		return "", false, nil
-	}
-	worktrees, err := listGitWorktreePaths()
-	if err != nil {
-		return "", false, nil
-	}
-	candidate := normalizePathForCompare(arg)
-	for _, wt := range worktrees {
-		if normalizePathForCompare(wt) == candidate {
-			return wt, true, nil
-		}
-	}
-	return "", false, nil
-}
-
-func resolveSiblingNameArg(arg string) (string, bool, error) {
-	if err := validateWorktreeName(arg); err != nil {
-		return "", false, nil
-	}
-	dir, err := resolveWorktreePath(arg)
-	if err != nil {
-		return "", false, err
-	}
-	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-		return dir, true, nil
-	}
-	return "", false, nil
-}
-
-func listGitWorktreePaths() ([]string, error) {
-	cmd := exec.Command("git", "worktree", "list", "--porcelain")
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, err
-	}
-	var paths []string
-	for _, line := range strings.Split(string(output), "\n") {
-		if strings.HasPrefix(line, "worktree ") {
-			paths = append(paths, strings.TrimPrefix(line, "worktree "))
-		}
-	}
-	return paths, nil
 }
 
 func isPathLikeArg(arg string) bool {
@@ -1223,20 +1278,6 @@ func normalizePathForCompare(path string) string {
 		p = resolved
 	}
 	return filepath.Clean(p)
-}
-
-// resolveOptionalWorktreeArgs splits args into (worktreeName, remainingArgs).
-// If the first arg is "." or matches a known worktree name, it's used as the
-// worktree name. Otherwise, the current worktree is used and all args pass through.
-func resolveOptionalWorktreeArgs(args []string) (string, []string, error) {
-	if len(args) == 0 {
-		name, err := resolveCurrentWorktreeName()
-		if err != nil {
-			return "", nil, err
-		}
-		return name, nil, nil
-	}
-	return resolveExecArgs(args)
 }
 
 func defaultVSCodeUserDataDir() string {
@@ -1443,6 +1484,18 @@ func validateWorktreeName(name string) error {
 	}
 	if filepath.Base(name) != name || filepath.IsAbs(name) {
 		return fmt.Errorf("invalid worktree name %q", name)
+	}
+	return nil
+}
+
+func validateBranchName(name string) error {
+	checkCmd := exec.Command("git", "check-ref-format", "--branch", name)
+	if output, err := checkCmd.CombinedOutput(); err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return fmt.Errorf("invalid branch name %q: %s (use --detach for a directory-only worktree name)", name, message)
 	}
 	return nil
 }

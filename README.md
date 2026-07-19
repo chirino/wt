@@ -41,6 +41,8 @@ VS Code's built-in browser and the `wt chrome` / `wt playwright` commands are pr
 ## Features
 
 - **Sibling directory layout** - Worktrees are created as siblings of the main repo (e.g., `myproject@feature` next to `myproject/`)
+- **Branch-backed by default** - New worktrees get a branch with the requested name; use `--detach` for disposable worktrees
+- **Flexible selection** - Address registered worktrees by branch name, legacy sibling alias, or absolute path, including worktrees created by other tools
 - **Environment file copying** - Automatically copies all `.env*` files from the project root to new worktrees
 - **Devcontainer support** - Start, build, and exec into per-worktree devcontainers
 - **VS Code integration** - Open worktrees in VS Code with devcontainer attach and per-worktree profile isolation
@@ -98,8 +100,16 @@ wt skill --install
 wt add feature-xyz
 ```
 
-Creates a worktree at `../myproject@feature-xyz` (sibling to your main repo) detached at the current HEAD. Automatically:
+Creates a worktree at `../myproject@feature-xyz` (sibling to your main repo) on a new `feature-xyz` branch at the current HEAD. If the local branch already exists and is not checked out, `wt` reuses it. Automatically:
 - Copies all `.env*` files from the root of the current project
+
+Use a detached HEAD for a disposable worktree:
+
+```bash
+wt add --detach experiment
+```
+
+Branch names containing `/` remain the worktree selector and are escaped only in the physical directory name. For example, `wt add feature/accounts` creates `myproject@feature%2Faccounts`, which you continue to address as `feature/accounts`.
 
 ### List worktrees
 
@@ -114,6 +124,13 @@ wt cd feature-xyz
 ```
 
 Opens a new shell in the worktree directory. Without arguments, opens a shell in the main repo root.
+
+Selectors may be an associated branch name, a legacy sibling directory alias, or the absolute path of any registered Git worktree. This includes worktrees created by tools such as Codex:
+
+```bash
+wt cd add-ai-chart-of-accounts
+wt exec add-ai-chart-of-accounts -- make test
+```
 
 ### Open in VS Code
 
@@ -211,11 +228,11 @@ wt rm feature-xyz
 
 | Command | Description |
 |---|---|
-| `wt add <name>` | Create a new worktree |
-| `wt ls` | List all sibling worktrees |
-| `wt rm <name> [git-args...]` | Remove a worktree and clean up its directory |
-| `wt cd [name]` | Open a shell in the worktree directory |
-| `wt code [name]` | Open the worktree in VS Code |
+| `wt add <name> [--detach]` | Create a branch-backed or detached worktree |
+| `wt ls` | List registered secondary worktrees by preferred selector |
+| `wt rm <selector> [git-args...]` | Remove a worktree and clean up its directory |
+| `wt cd [selector]` | Open a shell in the worktree directory |
+| `wt code [selector]` | Open the worktree in VS Code |
 | `wt name` | Print the current worktree name |
 | `wt dir` | Print the current worktree root directory |
 
