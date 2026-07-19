@@ -224,6 +224,41 @@ func TestLegacySiblingAliasStillResolves(t *testing.T) {
 	}
 }
 
+func TestResolveDirSupportsMainCurrentAndNamedWorktrees(t *testing.T) {
+	root := setupTestRepository(t)
+	worktreePath := filepath.Join(filepath.Dir(root), "project@feature")
+	gitRun(t, root, "worktree", "add", "-b", "feature", worktreePath, "HEAD")
+
+	chdir(t, worktreePath)
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "main checkout", want: root},
+		{name: "current worktree", args: []string{"."}, want: worktreePath},
+		{name: "named worktree", args: []string{"feature"}, want: worktreePath},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := resolveDir(test.args)
+			if err != nil {
+				t.Fatalf("resolveDir(%q) failed: %v", test.args, err)
+			}
+			if !samePath(got, test.want) {
+				t.Fatalf("resolveDir(%q) = %q, want %q", test.args, got, test.want)
+			}
+		})
+	}
+}
+
+func TestResolveDirRejectsUnknownWorktree(t *testing.T) {
+	setupTestRepository(t)
+	if _, err := resolveDir([]string{"missing"}); err == nil {
+		t.Fatal("resolveDir unexpectedly accepted an unknown worktree")
+	}
+}
+
 func TestDevcontainerNameUsesRepositoryAndWorktreeBranch(t *testing.T) {
 	root := setupTestRepository(t)
 	worktreePath := filepath.Join(filepath.Dir(root), "project@feature%2Faccounts")

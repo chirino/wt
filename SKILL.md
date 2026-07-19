@@ -90,7 +90,9 @@ wt bounce
 
 ## Quick reference
 
-All commands default to the current worktree when no name is given.
+Commands that accept a worktree name default to the current worktree unless
+documented otherwise. `wt dir` defaults to the main checkout; use `wt dir .`
+for the current worktree.
 
 | Command | Purpose |
 |---|---|
@@ -106,4 +108,4 @@ All commands default to the current worktree when no name is given.
 | `wt setup [selector]` | Copy the main checkout's root-level `.env*` files into an existing worktree |
 | `wt proxy-port [name]` | Print the SOCKS proxy port for the worktree |
 | `wt name` | Print the current worktree name |
-| `wt dir` | Print the current worktree root directory |
+| `wt dir [selector]` | Print the main checkout or selected worktree directory (`.` selects the current worktree) |

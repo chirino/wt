@@ -237,7 +237,9 @@ curl --proxy socks5h://127.0.0.1:$(wt proxy-port) http://127.0.0.1:8080
 
 ```bash
 wt name          # Print the current worktree name
-wt dir           # Print the current worktree root directory
+wt dir           # Print the main checkout directory
+wt dir .         # Print the current worktree directory
+wt dir feature-x # Print the named worktree directory
 wt proxy-port    # Print the SOCKS proxy port for the current worktree
 ```
 
@@ -259,7 +261,7 @@ wt rm feature-xyz
 | `wt cd [selector]` | Open a shell in the worktree directory |
 | `wt code [selector]` | Open the worktree in VS Code |
 | `wt name` | Print the current worktree name |
-| `wt dir` | Print the current worktree root directory |
+| `wt dir [selector]` | Print the main checkout or selected worktree directory (`.` selects the current worktree) |
 
 **Devcontainer commands**
 

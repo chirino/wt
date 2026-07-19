@@ -276,18 +276,15 @@ PowerShell:
 
 	// Dir command
 	dirCmd := &cobra.Command{
-		Use:     "dir",
-		Short:   "Print the root directory of the current worktree or git project",
-		Args:    cobra.NoArgs,
+		Use:     "dir [selector]",
+		Short:   "Print the main checkout or selected worktree directory",
 		GroupID: "worktree",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			root, err := getCurrentWorktreeRoot()
-			if err != nil {
-				return fmt.Errorf("not in a git repository")
-			}
-			fmt.Println(root)
-			return nil
-		},
+		Long: `Prints the main checkout directory when called without a selector.
+Use '.' for the current worktree, or pass a branch name, sibling alias, or path
+to print that registered worktree's directory.`,
+		Args:              cobra.MaximumNArgs(1),
+		RunE:              runDir,
+		ValidArgsFunction: worktreeArgsCompletion,
 	}
 
 	// Exec command
@@ -969,6 +966,30 @@ func runCD(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	return execShellInDir(dir)
+}
+
+func runDir(cmd *cobra.Command, args []string) error {
+	dir, err := resolveDir(args)
+	if err != nil {
+		return err
+	}
+	fmt.Println(dir)
+	return nil
+}
+
+func resolveDir(args []string) (string, error) {
+	if len(args) == 0 {
+		return getMainRepoRoot()
+	}
+
+	dir, ok, err := resolveWorktreeSelector(args[0])
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("worktree %q does not exist", args[0])
+	}
+	return dir, nil
 }
 
 func runCode(cmd *cobra.Command, args []string) error {
