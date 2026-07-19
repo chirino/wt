@@ -170,6 +170,39 @@ func TestLegacySiblingAliasStillResolves(t *testing.T) {
 	}
 }
 
+func TestDevcontainerNameUsesRepositoryAndWorktreeBranch(t *testing.T) {
+	root := setupTestRepository(t)
+	worktreePath := filepath.Join(filepath.Dir(root), "project@feature%2Faccounts")
+	gitRun(t, root, "worktree", "add", "-b", "feature/accounts", worktreePath, "HEAD")
+
+	got, err := devcontainerName(worktreePath)
+	if err != nil {
+		t.Fatalf("devcontainerName failed: %v", err)
+	}
+	const want = "wt-project-feature-accounts-762338eb"
+	if got != want {
+		t.Fatalf("devcontainerName = %q, want %q", got, want)
+	}
+}
+
+func TestDockerSafeContainerNamePreservesReadableNames(t *testing.T) {
+	const name = "wt-project-feature-accounts"
+	if got := dockerSafeContainerName(name); got != name {
+		t.Fatalf("dockerSafeContainerName = %q, want %q", got, name)
+	}
+}
+
+func TestDockerSafeContainerNameDisambiguatesSanitizedNames(t *testing.T) {
+	withSlash := dockerSafeContainerName("wt-project-feature/accounts")
+	withDash := dockerSafeContainerName("wt-project-feature-accounts")
+	if withSlash != "wt-project-feature-accounts-762338eb" {
+		t.Fatalf("sanitized name = %q", withSlash)
+	}
+	if withSlash == withDash {
+		t.Fatalf("sanitized names collide: %q", withSlash)
+	}
+}
+
 func setupTestRepository(t *testing.T) string {
 	t.Helper()
 	parent := t.TempDir()

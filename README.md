@@ -165,6 +165,9 @@ Start a worktree's devcontainer:
 wt up feature-xyz
 ```
 
+The primary container is named from the repository and worktree, for example
+`wt-myrepo-feature-xyz`, so it is easy to identify in `docker ps`.
+
 Build a worktree's devcontainer:
 
 ```bash

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
@@ -1152,7 +1153,19 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	dcArgs := append([]string{"up", "--workspace-folder", dir}, extra...)
-	return sysExec("devcontainer", dcArgs)
+	upCmd := exec.Command("devcontainer", dcArgs...)
+	upCmd.Stdin = os.Stdin
+	upCmd.Stdout = os.Stdout
+	upCmd.Stderr = os.Stderr
+	if err := upCmd.Run(); err != nil {
+		return fmt.Errorf("devcontainer up failed: %w", err)
+	}
+
+	containerID, err := getContainerID(dir)
+	if err != nil {
+		return err
+	}
+	return nameDevcontainer(dir, containerID)
 }
 
 func runDown(cmd *cobra.Command, args []string) error {
@@ -1363,6 +1376,9 @@ func openDevcontainer(dir string) error {
 	if err := json.Unmarshal(jsonLine, &result); err != nil {
 		return fmt.Errorf("failed to parse devcontainer up output: %w", err)
 	}
+	if err := nameDevcontainer(dir, result.ContainerID); err != nil {
+		return err
+	}
 
 	// Build VS Code arguments
 	hexID := hex.EncodeToString([]byte(result.ContainerID))
@@ -1407,6 +1423,92 @@ func getContainerID(dir string) (string, error) {
 		return "", fmt.Errorf("no running devcontainer found for %q; start one with: wt up %s", filepath.Base(dir), filepath.Base(dir))
 	}
 	return containerID, nil
+}
+
+// nameDevcontainer gives the primary devcontainer a stable, readable Docker
+// name derived from its repository and worktree names.
+func nameDevcontainer(dir, containerID string) error {
+	desiredName, err := devcontainerName(dir)
+	if err != nil {
+		return err
+	}
+
+	out, err := exec.Command("docker", "inspect", "--format", "{{.Name}}", containerID).Output()
+	if err != nil {
+		return fmt.Errorf("failed to inspect devcontainer %s: %w", containerID, err)
+	}
+	currentName := strings.TrimPrefix(strings.TrimSpace(string(out)), "/")
+	if currentName == desiredName {
+		return nil
+	}
+
+	if verbose {
+		fmt.Fprintf(os.Stderr, "Naming container %s as %s\n", containerID, desiredName)
+	}
+	renameCmd := exec.Command("docker", "rename", containerID, desiredName)
+	renameCmd.Stdout = os.Stdout
+	renameCmd.Stderr = os.Stderr
+	if err := renameCmd.Run(); err != nil {
+		return fmt.Errorf("failed to name devcontainer %q: %w", desiredName, err)
+	}
+	return nil
+}
+
+func devcontainerName(dir string) (string, error) {
+	mainRoot, err := getMainRepoRoot()
+	if err != nil {
+		return "", err
+	}
+	worktrees, err := listGitWorktrees()
+	if err != nil {
+		return "", fmt.Errorf("failed to list git worktrees: %w", err)
+	}
+	worktree, ok := findWorktreeByPath(dir, worktrees)
+	if !ok {
+		return "", fmt.Errorf("%q is not a registered git worktree", dir)
+	}
+
+	worktreeName := worktree.branch
+	if worktreeName == "" {
+		worktreeName = worktreeAlias(worktree.path, mainRoot)
+	}
+	if worktreeName == "" {
+		worktreeName = filepath.Base(worktree.path)
+	}
+	rawName := "wt-" + filepath.Base(mainRoot) + "-" + worktreeName
+	return dockerSafeContainerName(rawName), nil
+}
+
+func dockerSafeContainerName(name string) string {
+	var sanitized strings.Builder
+	changed := false
+	previousWasReplacement := false
+	for _, r := range name {
+		if isDockerContainerNameChar(r) {
+			sanitized.WriteRune(r)
+			previousWasReplacement = false
+			continue
+		}
+		changed = true
+		if !previousWasReplacement {
+			sanitized.WriteByte('-')
+			previousWasReplacement = true
+		}
+	}
+
+	result := strings.TrimRight(sanitized.String(), "-._")
+	if changed {
+		hash := sha256.Sum256([]byte(name))
+		result += "-" + hex.EncodeToString(hash[:4])
+	}
+	return result
+}
+
+func isDockerContainerNameChar(r rune) bool {
+	return r >= 'a' && r <= 'z' ||
+		r >= 'A' && r <= 'Z' ||
+		r >= '0' && r <= '9' ||
+		r == '-' || r == '_' || r == '.'
 }
 
 func getProxyPort(dir string) (string, error) {
